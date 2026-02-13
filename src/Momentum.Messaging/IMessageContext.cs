@@ -42,23 +42,23 @@ public sealed class MessageContextScope : IMessageContext
     private static readonly AsyncLocal<MessageContextScope?> CurrentScope = new();
 
     /// <summary>Get the current ambient context, or null if none.</summary>
-    internal static MessageContextScope? Current => CurrentScope.Value;
+    public static MessageContextScope? Current => CurrentScope.Value;
 
     private readonly IMessageBus _bus;
 
-    internal MessageContextScope(IMessageBus bus)
+    public MessageContextScope(IMessageBus bus)
     {
         _bus = bus;
     }
 
-    public string MessageId { get; internal set; } = null!;
-    public string? CorrelationId { get; internal set; }
-    public string? CausationId { get; internal set; }
-    public string? Source { get; internal set; }
-    public string? PartitionKey { get; internal set; }
-    public MessageHeaders Headers { get; internal set; } = MessageHeaders.Empty;
-    public DateTimeOffset Timestamp { get; internal set; }
-    public MessageEnvelope? Envelope { get; internal set; }
+    public string MessageId { get; set; } = null!;
+    public string? CorrelationId { get; set; }
+    public string? CausationId { get; set; }
+    public string? Source { get; set; }
+    public string? PartitionKey { get; set; }
+    public MessageHeaders Headers { get; set; } = MessageHeaders.Empty;
+    public DateTimeOffset Timestamp { get; set; }
+    public MessageEnvelope? Envelope { get; set; }
 
     public Task<TResponse> SendAsync<TResponse>(IRequest<TResponse> request, CancellationToken ct = default)
         => _bus.SendAsync(request, ct);
@@ -71,7 +71,7 @@ public sealed class MessageContextScope : IMessageContext
     /// Set this scope as the ambient context, returning the previous value
     /// so it can be restored after dispatch.
     /// </summary>
-    internal static MessageContextScope? SetCurrent(MessageContextScope scope)
+    public static MessageContextScope? SetCurrent(MessageContextScope scope)
     {
         var previous = CurrentScope.Value;
         CurrentScope.Value = scope;
@@ -79,7 +79,7 @@ public sealed class MessageContextScope : IMessageContext
     }
 
     /// <summary>Restore the previous ambient context.</summary>
-    internal static void RestoreCurrent(MessageContextScope? previous)
+    public static void RestoreCurrent(MessageContextScope? previous)
     {
         CurrentScope.Value = previous;
     }

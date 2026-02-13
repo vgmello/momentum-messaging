@@ -18,6 +18,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
     private const string IRequestGeneric = "Momentum.Messaging.IRequest`1";
     private const string INotificationFull = "Momentum.Messaging.INotification";
     private const string UnitFull = "Momentum.Messaging.Unit";
+    private const string IMessageContextFull = "Momentum.Messaging.IMessageContext";
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
@@ -213,14 +214,31 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
             foreach (var method in methods)
             {
                 var parameters = method.Parameters;
-                if (parameters.Length is 0 or > 2)
-                    continue;
-
-                if (parameters.Length == 2 &&
-                    parameters[1].Type.ToDisplayString() != "System.Threading.CancellationToken")
+                if (parameters.Length == 0 || parameters.Length > 3)
                     continue;
 
                 var messageType = parameters[0].Type;
+                var hasContext = false;
+                var hasCt = false;
+
+                // Parse remaining params: optional IMessageContext, optional CancellationToken
+                var valid = true;
+                for (var p = 1; p < parameters.Length; p++)
+                {
+                    var pType = parameters[p].Type.ToDisplayString();
+                    if (pType == IMessageContextFull)
+                        hasContext = true;
+                    else if (pType == "System.Threading.CancellationToken")
+                        hasCt = true;
+                    else
+                    {
+                        valid = false;
+                        break;
+                    }
+                }
+
+                if (!valid)
+                    continue;
 
                 // Notification
                 if (ImplementsInterface(messageType, INotificationFull))
@@ -234,6 +252,8 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
                         ResponseTypeFullName = UnitFull,
                         MethodName = method.Name,
                         IsNotification = true,
+                        HasContextParam = hasContext,
+                        HasCancellationToken = hasCt,
                     });
                     continue;
                 }
@@ -254,6 +274,8 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
                         ResponseTypeFullName = responseType.ToDisplayString(),
                         MethodName = method.Name,
                         IsNotification = false,
+                        HasContextParam = hasContext,
+                        HasCancellationToken = hasCt,
                     });
                 }
             }
@@ -293,62 +315,119 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("        _publishStrategy = publishStrategy;");
         sb.AppendLine("    }");
         sb.AppendLine();
+        sb.AppendLine("    private static MessageContextScope CreateScope(IMessageBus bus)");
+        sb.AppendLine("    {");
+        sb.AppendLine("        var parent = MessageContextScope.Current;");
+        sb.AppendLine("        var scope = new MessageContextScope(bus);");
+        sb.AppendLine("        scope.MessageId = System.Guid.NewGuid().ToString(\"N\");");
+        sb.AppendLine("        scope.CorrelationId = parent?.CorrelationId ?? System.Guid.NewGuid().ToString(\"N\");");
+        sb.AppendLine("        scope.CausationId = parent?.MessageId;");
+        sb.AppendLine("        scope.Timestamp = System.DateTimeOffset.UtcNow;");
+        sb.AppendLine("        return scope;");
+        sb.AppendLine("    }");
+        sb.AppendLine();
 
         // SendAsync
-        sb.AppendLine("    public Task<TResponse> SendAsync<TResponse>(IRequest<TResponse> request, CancellationToken ct = default)");
+        sb.AppendLine("    public async Task<TResponse> SendAsync<TResponse>(IRequest<TResponse> request, CancellationToken ct = default)");
         sb.AppendLine("    {");
-        sb.AppendLine("        switch (request)");
+        sb.AppendLine("        using var diScope = _sp.CreateScope();");
+        sb.AppendLine("        var scopedSp = diScope.ServiceProvider;");
+        sb.AppendLine("        var ctx = CreateScope(this);");
+        sb.AppendLine("        var previous = MessageContextScope.SetCurrent(ctx);");
+        sb.AppendLine("        try");
         sb.AppendLine("        {");
+        sb.AppendLine("            switch (request)");
+        sb.AppendLine("            {");
 
         foreach (var req in requests)
         {
-            sb.AppendLine($"            case {req.MessageTypeFullName} msg:");
-            sb.AppendLine("            {");
-            sb.AppendLine($"                var handler = _sp.GetRequiredService<{req.HandlerTypeFullName}>();");
-            sb.AppendLine($"                var behaviors = _sp.GetServices<IPipelineBehavior<{req.MessageTypeFullName}, {req.ResponseTypeFullName}>>();");
-            sb.AppendLine($"                NextDelegate<{req.ResponseTypeFullName}> pipeline = () => handler.{req.MethodName}(msg, ct);");
-            sb.AppendLine("                foreach (var behavior in behaviors.Reverse())");
+            var handlerCall = BuildHandlerCall(req, "msg");
+            sb.AppendLine($"                case {req.MessageTypeFullName} msg:");
             sb.AppendLine("                {");
-            sb.AppendLine("                    var next = pipeline;");
-            sb.AppendLine("                    var b = behavior;");
-            sb.AppendLine("                    pipeline = () => b.HandleAsync(msg, next, ct);");
+            sb.AppendLine($"                    var handler = scopedSp.GetRequiredService<{req.HandlerTypeFullName}>();");
+            sb.AppendLine($"                    var behaviors = scopedSp.GetServices<IPipelineBehavior<{req.MessageTypeFullName}, {req.ResponseTypeFullName}>>();");
+            sb.AppendLine($"                    NextDelegate<{req.ResponseTypeFullName}> pipeline = () => {handlerCall};");
+            sb.AppendLine("                    foreach (var behavior in behaviors.Reverse())");
+            sb.AppendLine("                    {");
+            sb.AppendLine("                        var next = pipeline;");
+            sb.AppendLine("                        var b = behavior;");
+            sb.AppendLine("                        pipeline = () => b.HandleAsync(msg, next, ct);");
+            sb.AppendLine("                    }");
+            sb.AppendLine("                    return (TResponse)(object)await pipeline().ConfigureAwait(false);");
             sb.AppendLine("                }");
-            sb.AppendLine("                return (Task<TResponse>)(object)pipeline();");
-            sb.AppendLine("            }");
         }
 
-        sb.AppendLine("            default:");
-        sb.AppendLine("                throw new InvalidOperationException(");
-        sb.AppendLine("                    $\"No handler found for {request.GetType().Name}. Ensure a handler follows Momentum conventions.\");");
+        sb.AppendLine("                default:");
+        sb.AppendLine("                    throw new InvalidOperationException(");
+        sb.AppendLine("                        $\"No handler found for {request.GetType().Name}. Ensure a handler follows Momentum conventions.\");");
+        sb.AppendLine("            }");
+        sb.AppendLine("        }");
+        sb.AppendLine("        finally");
+        sb.AppendLine("        {");
+        sb.AppendLine("            MessageContextScope.RestoreCurrent(previous);");
         sb.AppendLine("        }");
         sb.AppendLine("    }");
         sb.AppendLine();
 
         // PublishAsync
-        sb.AppendLine("    public Task PublishAsync<TNotification>(TNotification notification, CancellationToken ct = default)");
+        sb.AppendLine("    public async Task PublishAsync<TNotification>(TNotification notification, CancellationToken ct = default)");
         sb.AppendLine("        where TNotification : INotification");
         sb.AppendLine("    {");
+        sb.AppendLine("        using var diScope = _sp.CreateScope();");
+        sb.AppendLine("        var scopedSp = diScope.ServiceProvider;");
+        sb.AppendLine("        var ctx = CreateScope(this);");
+        sb.AppendLine("        var previous = MessageContextScope.SetCurrent(ctx);");
+        sb.AppendLine("        try");
+        sb.AppendLine("        {");
 
         foreach (var group in notificationGroups)
         {
-            sb.AppendLine($"        if (notification is {group.Key} typedNotification)");
-            sb.AppendLine("        {");
-            sb.AppendLine($"            var handlers = new Func<{group.Key}, CancellationToken, Task>[]");
+            sb.AppendLine($"            if (notification is {group.Key} typedNotification)");
             sb.AppendLine("            {");
+            sb.AppendLine($"                var handlers = new Func<{group.Key}, CancellationToken, Task>[]");
+            sb.AppendLine("                {");
             foreach (var h in group)
-                sb.AppendLine($"                (n, c) => _sp.GetRequiredService<{h.HandlerTypeFullName}>().{h.MethodName}(n, c),");
-            sb.AppendLine("            };");
-            sb.AppendLine("            return _publishStrategy.PublishAsync(");
-            sb.AppendLine("                (IReadOnlyList<Func<TNotification, CancellationToken, Task>>)(object)handlers,");
-            sb.AppendLine("                notification, ct);");
-            sb.AppendLine("        }");
+            {
+                var notifCall = BuildNotificationHandlerCall(h);
+                sb.AppendLine($"                    (n, c) => {{ var h = scopedSp.GetRequiredService<{h.HandlerTypeFullName}>(); return {notifCall}; }},");
+            }
+            sb.AppendLine("                };");
+            sb.AppendLine("                await _publishStrategy.PublishAsync(");
+            sb.AppendLine("                    (IReadOnlyList<Func<TNotification, CancellationToken, Task>>)(object)handlers,");
+            sb.AppendLine("                    notification, ct).ConfigureAwait(false);");
+            sb.AppendLine("                return;");
+            sb.AppendLine("            }");
         }
 
-        sb.AppendLine("        return Task.CompletedTask;");
+        sb.AppendLine("        }");
+        sb.AppendLine("        finally");
+        sb.AppendLine("        {");
+        sb.AppendLine("            MessageContextScope.RestoreCurrent(previous);");
+        sb.AppendLine("        }");
         sb.AppendLine("    }");
         sb.AppendLine("}");
 
         return sb.ToString();
+    }
+
+    private static string BuildHandlerCall(HandlerInfo h, string msgVar)
+    {
+        var args = msgVar;
+        if (h.HasContextParam)
+            args += ", ctx";
+        if (h.HasCancellationToken)
+            args += ", ct";
+        return "handler." + h.MethodName + "(" + args + ")";
+    }
+
+    private static string BuildNotificationHandlerCall(HandlerInfo h)
+    {
+        var args = "n";
+        if (h.HasContextParam)
+            args += ", MessageContextScope.Current!";
+        if (h.HasCancellationToken)
+            args += ", c";
+        return "h." + h.MethodName + "(" + args + ")";
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -403,6 +482,8 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("        }");
         sb.AppendLine();
         sb.AppendLine("        services.TryAddSingleton<IMessageBus, GeneratedMessageBus>();");
+        sb.AppendLine("        services.TryAddScoped<IMessageContext>(sp => MessageContextScope.Current ?? throw new InvalidOperationException(");
+        sb.AppendLine("            \"IMessageContext is only available during message dispatch. Use IMessageBus for sending outside handlers.\"));");
         sb.AppendLine("    }");
         sb.AppendLine("}");
 
@@ -456,6 +537,8 @@ internal sealed class HandlerInfo
     public string ResponseTypeFullName { get; set; } = null!;
     public string MethodName { get; set; } = null!;
     public bool IsNotification { get; set; }
+    public bool HasContextParam { get; set; }
+    public bool HasCancellationToken { get; set; }
 }
 
 internal sealed class GeneratorConfig
