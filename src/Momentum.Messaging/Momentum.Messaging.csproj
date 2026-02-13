@@ -10,4 +10,8 @@
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="9.0.*" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="../Momentum.Messaging.Abstractions/Momentum.Messaging.Abstractions.csproj" />
+  </ItemGroup>
+
 </Project>
