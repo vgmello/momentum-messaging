@@ -15,7 +15,7 @@ Four projects in `src/`:
 
 | Project                           | Target             | Purpose                                                |
 | --------------------------------- | ------------------ | ------------------------------------------------------ |
-| `Momentum.Messaging`              | net10.0            | Core mediator, pipeline behaviors, builder, attributes |
+| `Momentum.Messaging`              | net10.0            | Core message bus, IMessageContext, pipeline behaviors, builder, attributes |
 | `Momentum.Messaging.Abstractions` | net10.0            | Transport & serialization contracts (zero deps)        |
 | `Momentum.Messaging.Generators`   | **netstandard2.0** | Roslyn source generator (compile-time only)            |
 | `Momentum.Messaging.Outbox`       | net10.0            | Transactional outbox/inbox pattern                     |
@@ -27,6 +27,9 @@ Four projects in `src/`:
 ## Design Principles
 
 - **Convention-based handlers**: Classes ending in `Handler` (configurable suffix) with `HandleAsync` methods. No `IRequestHandler<,>` interfaces.
+- **`IMessageBus` dispatch**: The primary dispatch interface. Supports `SendAsync` (request/response) and `PublishAsync` (notifications).
+- **`IMessageContext` ambient metadata**: Extends `IMessageBus` with ambient message metadata (`MessageId`, `CorrelationId`, `CausationId`, `Source`, `PartitionKey`, `Headers`, `Timestamp`, `Envelope`). Handlers can accept `IMessageContext` as a parameter to access scoped context during dispatch.
+- **`IDeliveryContext` for transport**: Transport-level acknowledgment/rejection contract (formerly `IMessageContext` in Abstractions). Renamed to avoid collision with the new `IMessageContext`.
 - **Source generation only**: No reflection fallback. If the generator hasn't run, `AddMomentum()` throws at startup.
 - **AOT-first**: `IsAotCompatible=true`, `EnableTrimAnalyzer=true`, `TreatWarningsAsErrors=true`. Never introduce reflection, `dynamic`, expression compilation, or `Assembly.GetTypes()`.
 - **Outbox as pipeline behavior**: `OutboxBehavior<,>` wraps handlers. The behavior owns the DB transaction -- handlers never commit/rollback.
@@ -45,7 +48,7 @@ Four projects in `src/`:
 ## Source Generator Notes
 
 - Generator lives in `Momentum.Messaging.Generators/MomentumSourceGenerator.cs`
-- Emits two files: `MomentumMediator.g.cs` (switch-based dispatch) and `MomentumRegistration.g.cs` (DI + ModuleInitializer)
+- Emits two files: `MomentumMessageBus.g.cs` (switch-based dispatch via `GeneratedMessageBus`) and `MomentumRegistration.g.cs` (DI + ModuleInitializer)
 - Diagnostics: `MOM001` (no handlers found), `MOM002` (duplicate request handler)
 - Discovery configuration: assembly attributes take precedence over `.csproj` properties
 
