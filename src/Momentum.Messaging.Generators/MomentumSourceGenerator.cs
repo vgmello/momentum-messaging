@@ -15,7 +15,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
     private const string HandlerSuffixAttr = "Momentum.Messaging.MomentumHandlerSuffixAttribute";
     private const string MethodNameAttr = "Momentum.Messaging.MomentumMethodNameAttribute";
     private const string DiscoveryStrategyAttr = "Momentum.Messaging.MomentumDiscoveryStrategyAttribute";
-    private const string IRequestGeneric = "Momentum.Messaging.IRequest`1";
+    private const string IRequestGeneric = "Momentum.Messaging.IRequest<TResponse>";
     private const string INotificationFull = "Momentum.Messaging.INotification";
     private const string UnitFull = "Momentum.Messaging.Unit";
     private const string IMessageContextFull = "Momentum.Messaging.IMessageContext";
@@ -265,6 +265,8 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
                 if (requestInterface is not null)
                 {
                     var responseType = requestInterface.TypeArguments[0];
+                    // Detect if the handler method returns Task (void) vs Task<T>
+                    var returnsVoidTask = method.ReturnType.ToDisplayString() == "System.Threading.Tasks.Task";
                     handlers.Add(new HandlerInfo
                     {
                         HandlerTypeFullName = symbol.ToDisplayString(),
@@ -276,6 +278,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
                         IsNotification = false,
                         HasContextParam = hasContext,
                         HasCancellationToken = hasCt,
+                        ReturnsVoidTask = returnsVoidTask,
                     });
                 }
             }
@@ -346,7 +349,10 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
             sb.AppendLine("                {");
             sb.AppendLine($"                    var handler = scopedSp.GetRequiredService<{req.HandlerTypeFullName}>();");
             sb.AppendLine($"                    var behaviors = scopedSp.GetServices<IPipelineBehavior<{req.MessageTypeFullName}, {req.ResponseTypeFullName}>>();");
-            sb.AppendLine($"                    NextDelegate<{req.ResponseTypeFullName}> pipeline = () => {handlerCall};");
+            if (req.ReturnsVoidTask)
+                sb.AppendLine($"                    NextDelegate<{req.ResponseTypeFullName}> pipeline = async () => {{ await {handlerCall}.ConfigureAwait(false); return {UnitFull}.Value; }};");
+            else
+                sb.AppendLine($"                    NextDelegate<{req.ResponseTypeFullName}> pipeline = () => {handlerCall};");
             sb.AppendLine("                    foreach (var behavior in behaviors.Reverse())");
             sb.AppendLine("                    {");
             sb.AppendLine("                        var next = pipeline;");
@@ -457,6 +463,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("        MomentumGeneratedHook.RegistrationAction = RegisterHandlers;");
         sb.AppendLine("    }");
         sb.AppendLine();
+        sb.AppendLine("#pragma warning disable IL2055, IL2072, IL3050");
         sb.AppendLine("    private static void RegisterHandlers(IServiceCollection services, ServiceLifetime lifetime, IReadOnlyList<Type> behaviorTypes)");
         sb.AppendLine("    {");
         sb.AppendLine("        // Handler registrations (concrete types — fully AOT-safe)");
@@ -480,6 +487,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         }
 
         sb.AppendLine("        }");
+        sb.AppendLine("#pragma warning restore IL2055, IL2072, IL3050");
         sb.AppendLine();
         sb.AppendLine("        services.TryAddSingleton<IMessageBus, GeneratedMessageBus>();");
         sb.AppendLine("        services.TryAddScoped<IMessageContext>(sp => MessageContextScope.Current ?? throw new InvalidOperationException(");
@@ -539,6 +547,7 @@ internal sealed class HandlerInfo
     public bool IsNotification { get; set; }
     public bool HasContextParam { get; set; }
     public bool HasCancellationToken { get; set; }
+    public bool ReturnsVoidTask { get; set; }
 }
 
 internal sealed class GeneratorConfig

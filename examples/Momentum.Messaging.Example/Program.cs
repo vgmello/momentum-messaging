@@ -34,8 +34,11 @@ public sealed record OrderCreated(Guid OrderId, string ProductId) : INotificatio
 
 public sealed class CreateOrderHandler                               // ✅ matches "Handler" suffix
 {
-    public async Task<OrderResult> HandleAsync(CreateOrder req, CancellationToken ct)   // ✅ matches "HandleAsync"
+    public async Task<OrderResult> HandleAsync(CreateOrder req, IMessageContext ctx, CancellationToken ct)   // ✅ matches "HandleAsync"
     {
+        Console.WriteLine($"  MessageId:     {ctx.MessageId}");
+        Console.WriteLine($"  CorrelationId: {ctx.CorrelationId}");
+        Console.WriteLine($"  CausationId:   {ctx.CausationId ?? "(root)"}");
         return new OrderResult(Guid.NewGuid(), DateTime.UtcNow);
     }
 }
