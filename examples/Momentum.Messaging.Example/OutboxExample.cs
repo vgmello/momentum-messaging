@@ -89,13 +89,13 @@ public sealed class CreateOrderHandler
     private readonly IDbConnection _db;
     private readonly IOutboxCollector _outbox;
     private readonly IOutboxTransactionAccessor _tx;
-    private readonly IMediator _mediator;
+    private readonly IMessageBus _bus;
 
     public CreateOrderHandler(
         IDbConnection db, IOutboxCollector outbox,
-        IOutboxTransactionAccessor tx, IMediator mediator)
+        IOutboxTransactionAccessor tx, IMessageBus bus)
     {
-        _db = db; _outbox = outbox; _tx = tx; _mediator = mediator;
+        _db = db; _outbox = outbox; _tx = tx; _bus = bus;
     }
 
     public async Task<OrderResult> HandleAsync(CreateOrder request, CancellationToken ct)
@@ -107,8 +107,8 @@ public sealed class CreateOrderHandler
 
         _outbox.Add(new OrderCreatedEvent(orderId, request.ProductId), "orders.created");
 
-        await _mediator.SendAsync(new SendNotification(orderId, "user@example.com"), ct);
-        await _mediator.SendAsync(new ReserveInventory(orderId, request.ProductId, request.Quantity), ct);
+        await _bus.SendAsync(new SendNotification(orderId, "user@example.com"), ct);
+        await _bus.SendAsync(new ReserveInventory(orderId, request.ProductId, request.Quantity), ct);
 
         return new OrderResult(orderId);
     }

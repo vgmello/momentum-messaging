@@ -1,6 +1,6 @@
 namespace Momentum.Messaging;
 
-public interface IMediator
+public interface IMessageBus
 {
     Task<TResponse> SendAsync<TResponse>(IRequest<TResponse> request, CancellationToken ct = default);
     Task PublishAsync<TNotification>(TNotification notification, CancellationToken ct = default)

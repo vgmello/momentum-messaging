@@ -88,7 +88,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
                 return;
             }
 
-            ctx.AddSource("MomentumMediator.g.cs", EmitMediator(handlers));
+            ctx.AddSource("MomentumMessageBus.g.cs", EmitMediator(handlers));
             ctx.AddSource("MomentumRegistration.g.cs", EmitRegistration(handlers));
         });
     }
@@ -282,12 +282,12 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine();
         sb.AppendLine("namespace Momentum.Messaging.Generated;");
         sb.AppendLine();
-        sb.AppendLine("internal sealed class GeneratedMediator : IMediator");
+        sb.AppendLine("internal sealed class GeneratedMessageBus : IMessageBus");
         sb.AppendLine("{");
         sb.AppendLine("    private readonly IServiceProvider _sp;");
         sb.AppendLine("    private readonly INotificationPublishStrategy _publishStrategy;");
         sb.AppendLine();
-        sb.AppendLine("    public GeneratedMediator(IServiceProvider sp, INotificationPublishStrategy publishStrategy)");
+        sb.AppendLine("    public GeneratedMessageBus(IServiceProvider sp, INotificationPublishStrategy publishStrategy)");
         sb.AppendLine("    {");
         sb.AppendLine("        _sp = sp;");
         sb.AppendLine("        _publishStrategy = publishStrategy;");
@@ -402,7 +402,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
 
         sb.AppendLine("        }");
         sb.AppendLine();
-        sb.AppendLine("        services.TryAddSingleton<IMediator, GeneratedMediator>();");
+        sb.AppendLine("        services.TryAddSingleton<IMessageBus, GeneratedMessageBus>();");
         sb.AppendLine("    }");
         sb.AppendLine("}");
 

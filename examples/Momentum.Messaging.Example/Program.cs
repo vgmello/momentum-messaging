@@ -126,13 +126,13 @@ public static class Program
         });
 
         await using var provider = services.BuildServiceProvider();
-        var mediator = provider.GetRequiredService<IMediator>();
+        var bus = provider.GetRequiredService<IMessageBus>();
 
-        var result = await mediator.SendAsync(new CreateOrder("SKU-42", 3));
+        var result = await bus.SendAsync(new CreateOrder("SKU-42", 3));
         Console.WriteLine($"✅ Order: {result.OrderId}");
 
-        await mediator.SendAsync(new CancelOrder(result.OrderId));
+        await bus.SendAsync(new CancelOrder(result.OrderId));
 
-        await mediator.PublishAsync(new OrderCreated(result.OrderId, "SKU-42"));
+        await bus.PublishAsync(new OrderCreated(result.OrderId, "SKU-42"));
     }
 }
