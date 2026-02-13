@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Diagnostics;
 
 namespace Momentum.Messaging.Generators;
 
@@ -35,7 +36,8 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
                 transform: static (ctx, ct) =>
                     ctx.SemanticModel.GetDeclaredSymbol((ClassDeclarationSyntax)ctx.Node, ct))
             .Where(static s => s is not null && !s.IsAbstract)
-            .Collect()!;
+            .Select(static (s, _) => (INamedTypeSymbol)s!)
+            .Collect();
 
         // ── Step 3: Read .csproj build properties as fallback ──
         var configProvider = context.AnalyzerConfigOptionsProvider;
@@ -58,7 +60,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
             var config = ReadConfig(assembly, configOptions);
 
             // Discover handlers
-            var handlers = DiscoverHandlers(candidates!, config);
+            var handlers = DiscoverHandlers(candidates, config);
 
             if (handlers.Count == 0)
             {
@@ -114,12 +116,12 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         {
             configOptions.GlobalOptions.TryGetValue("build_property.MomentumHandlerSuffix", out var csprojSuffix);
             if (!string.IsNullOrWhiteSpace(csprojSuffix))
-                suffixes = csprojSuffix!.Split(';', StringSplitOptions.RemoveEmptyEntries).ToList();
+                suffixes = csprojSuffix!.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries).ToList();
         }
 
         // Default
         if (suffixes.Count == 0)
-            suffixes = ["Handler"];
+            suffixes = new List<string> { "Handler" };
 
         // ── Method names: [assembly: MomentumMethodName("...")] (multiple) ──
         var methodNames = attrs
@@ -134,12 +136,12 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         {
             configOptions.GlobalOptions.TryGetValue("build_property.MomentumMethodName", out var csprojMethod);
             if (!string.IsNullOrWhiteSpace(csprojMethod))
-                methodNames = csprojMethod!.Split(';', StringSplitOptions.RemoveEmptyEntries).ToList();
+                methodNames = csprojMethod!.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries).ToList();
         }
 
         // Default
         if (methodNames.Count == 0)
-            methodNames = ["HandleAsync"];
+            methodNames = new List<string> { "HandleAsync" };
 
         // ── Custom discovery strategy: [assembly: MomentumDiscoveryStrategy(typeof(...))] ──
         var strategyAttr = attrs
@@ -447,18 +449,18 @@ internal static class Diagnostics
 
 internal sealed class HandlerInfo
 {
-    public required string HandlerTypeFullName { get; init; }
-    public required string HandlerTypeName { get; init; }
-    public required string MessageTypeFullName { get; init; }
-    public required string MessageTypeName { get; init; }
-    public required string ResponseTypeFullName { get; init; }
-    public required string MethodName { get; init; }
-    public required bool IsNotification { get; init; }
+    public string HandlerTypeFullName { get; set; } = null!;
+    public string HandlerTypeName { get; set; } = null!;
+    public string MessageTypeFullName { get; set; } = null!;
+    public string MessageTypeName { get; set; } = null!;
+    public string ResponseTypeFullName { get; set; } = null!;
+    public string MethodName { get; set; } = null!;
+    public bool IsNotification { get; set; }
 }
 
 internal sealed class GeneratorConfig
 {
-    public required List<string> HandlerSuffixes { get; init; }
-    public required List<string> MethodNames { get; init; }
-    public string? CustomDiscoveryStrategyType { get; init; }
+    public List<string> HandlerSuffixes { get; set; } = null!;
+    public List<string> MethodNames { get; set; } = null!;
+    public string? CustomDiscoveryStrategyType { get; set; }
 }

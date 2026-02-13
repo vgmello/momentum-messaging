@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -21,6 +22,7 @@ public sealed class MomentumBuilder
     private readonly IServiceCollection _services;
     private readonly List<Type> _behaviorTypes = [];
     private ServiceLifetime _handlerLifetime = ServiceLifetime.Transient;
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)]
     private Type _publishStrategyType = typeof(SequentialStrategy);
 
     internal MomentumBuilder(IServiceCollection services) => _services = services;
@@ -54,7 +56,7 @@ public sealed class MomentumBuilder
         return this;
     }
 
-    public MomentumBuilder UseNotificationStrategy<T>() where T : class, INotificationPublishStrategy
+    public MomentumBuilder UseNotificationStrategy<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T>() where T : class, INotificationPublishStrategy
     {
         _publishStrategyType = typeof(T);
         return this;

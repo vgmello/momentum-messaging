@@ -18,7 +18,6 @@ public static class OutboxServiceCollectionExtensions
         services.TryAddScoped<IOutboxTransactionAccessor>(sp => sp.GetRequiredService<OutboxTransactionAccessor>());
 
         // Transaction mode + registry
-        services.AddSingleton(options.TransactionMode);
         services.TryAddSingleton<IHandlerTransactionRegistry>(
             new DefaultHandlerTransactionRegistry(options.TransactionMode));
 

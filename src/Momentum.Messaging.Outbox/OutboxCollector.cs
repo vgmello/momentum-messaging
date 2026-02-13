@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Momentum.Messaging.Abstractions;
 
 namespace Momentum.Messaging.Outbox;
@@ -12,7 +13,7 @@ public interface IOutboxCollector
     /// <summary>
     /// Stage a message for outbox publishing.
     /// </summary>
-    void Add<TMessage>(
+    void Add<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)] TMessage>(
         TMessage message,
         string destination,
         Action<PublishOptions>? configure = null)
@@ -45,6 +46,7 @@ public enum CollectionTarget
 public sealed class CollectedMessage
 {
     public required object Message { get; init; }
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)]
     public required Type MessageType { get; init; }
     public required string Destination { get; init; }
     public PublishOptions Options { get; init; } = new();
@@ -57,7 +59,7 @@ internal sealed class OutboxCollector : IOutboxCollector
 
     public CollectionTarget ActiveTarget { get; set; } = CollectionTarget.Ambient;
 
-    public void Add<TMessage>(
+    public void Add<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)] TMessage>(
         TMessage message,
         string destination,
         Action<PublishOptions>? configure = null)

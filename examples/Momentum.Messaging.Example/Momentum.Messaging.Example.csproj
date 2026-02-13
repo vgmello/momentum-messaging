@@ -4,12 +4,20 @@
     <OutputType>Exe</OutputType>
   </PropertyGroup>
 
+  <!-- OutboxExample.cs is a standalone demo — excluded to avoid duplicate types with Program.cs -->
+  <ItemGroup>
+    <Compile Remove="OutboxExample.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\..\src\Momentum.Messaging\Momentum.Messaging.csproj" />
     <ProjectReference Include="..\..\src\Momentum.Messaging.Abstractions\Momentum.Messaging.Abstractions.csproj" />
     <ProjectReference Include="..\..\src\Momentum.Messaging.Outbox\Momentum.Messaging.Outbox.csproj" />
-    <ProjectReference Include="..\..\src\Momentum.Messaging.Generators\Momentum.Messaging.Generators.csproj"
-                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\src\Momentum.Messaging.Generators\Momentum.Messaging.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.*" />
   </ItemGroup>
 
   <!-- Strategy configuration (uncomment to customize) -->

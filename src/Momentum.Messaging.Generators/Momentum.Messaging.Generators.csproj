@@ -12,8 +12,10 @@
     <DevelopmentDependency>true</DevelopmentDependency>
 
     <!-- Override Directory.Build.props — generators are compile-time tools, not runtime -->
+    <LangVersion>11</LangVersion>
     <IsAotCompatible>false</IsAotCompatible>
     <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
+    <NoWarn>$(NoWarn);RS2008</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
