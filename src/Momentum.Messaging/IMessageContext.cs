@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using Momentum.Messaging.Abstractions;
 
 namespace Momentum.Messaging;
@@ -37,15 +38,19 @@ public interface IMessageContext : IMessageBus
 /// Scoped implementation of <see cref="IMessageContext"/>.
 /// Created per dispatch by the generated message bus.
 /// </summary>
+/// <remarks>Infrastructure type — use <see cref="IMessageContext"/> in handler code.</remarks>
+[EditorBrowsable(EditorBrowsableState.Never)]
 public sealed class MessageContextScope : IMessageContext
 {
     private static readonly AsyncLocal<MessageContextScope?> CurrentScope = new();
 
     /// <summary>Get the current ambient context, or null if none.</summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
     public static MessageContextScope? Current => CurrentScope.Value;
 
     private readonly IMessageBus _bus;
 
+    [EditorBrowsable(EditorBrowsableState.Never)]
     public MessageContextScope(IMessageBus bus)
     {
         _bus = bus;
@@ -71,6 +76,7 @@ public sealed class MessageContextScope : IMessageContext
     /// Set this scope as the ambient context, returning the previous value
     /// so it can be restored after dispatch.
     /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
     public static MessageContextScope? SetCurrent(MessageContextScope scope)
     {
         var previous = CurrentScope.Value;
@@ -79,6 +85,7 @@ public sealed class MessageContextScope : IMessageContext
     }
 
     /// <summary>Restore the previous ambient context.</summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
     public static void RestoreCurrent(MessageContextScope? previous)
     {
         CurrentScope.Value = previous;
