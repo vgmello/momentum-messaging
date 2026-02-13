@@ -22,7 +22,7 @@ public sealed class SubscriptionOptions
 
     /// <summary>
     /// Auto-acknowledge after successful processing (default: true).
-    /// Set to false for manual ack via IMessageContext.
+    /// Set to false for manual ack via IDeliveryContext.
     /// </summary>
     public bool AutoAcknowledge { get; init; } = true;
 

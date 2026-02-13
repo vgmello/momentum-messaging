@@ -25,7 +25,7 @@ public sealed class InboxMessageProcessor : IMessageProcessor
 
     public async Task ProcessAsync(
         MessageEnvelope envelope,
-        IMessageContext context,
+        IDeliveryContext context,
         CancellationToken ct = default)
     {
         var messageId = envelope.MessageId;

@@ -27,7 +27,7 @@ public interface IMessageConsumer
 /// </summary>
 public interface IMessageProcessor
 {
-    Task ProcessAsync(MessageEnvelope envelope, IMessageContext context, CancellationToken ct = default);
+    Task ProcessAsync(MessageEnvelope envelope, IDeliveryContext context, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -35,7 +35,7 @@ public interface IMessageProcessor
 /// semantics that the transport adapter translates to its native protocol
 /// (Kafka offset commit, RabbitMQ ack/nack, etc.).
 /// </summary>
-public interface IMessageContext
+public interface IDeliveryContext
 {
     /// <summary>The raw envelope.</summary>
     MessageEnvelope Envelope { get; }
