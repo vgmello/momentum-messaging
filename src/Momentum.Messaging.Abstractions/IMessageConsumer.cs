@@ -3,7 +3,7 @@ namespace Momentum.Messaging.Abstractions;
 /// <summary>
 /// Subscribes to a transport and receives messages. Each transport plugin
 /// provides an implementation. The consumer runs as a hosted service
-/// and dispatches received messages to the mediator (through the inbox
+/// and dispatches received messages to the message bus (through the inbox
 /// if enabled).
 /// </summary>
 public interface IMessageConsumer
@@ -22,7 +22,7 @@ public interface IMessageConsumer
 
 /// <summary>
 /// Processes a received message envelope. The default implementation
-/// deserializes the envelope and dispatches to the mediator.
+/// deserializes the envelope and dispatches to the message bus.
 /// When inbox is enabled, it wraps this with deduplication.
 /// </summary>
 public interface IMessageProcessor

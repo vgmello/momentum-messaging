@@ -89,7 +89,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
                 return;
             }
 
-            ctx.AddSource("MomentumMessageBus.g.cs", EmitMediator(handlers));
+            ctx.AddSource("MomentumMessageBus.g.cs", EmitMessageBus(handlers));
             ctx.AddSource("MomentumRegistration.g.cs", EmitRegistration(handlers));
         });
     }
@@ -288,10 +288,10 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
     }
 
     // ═════════════════════════════════════════════════════════════════════
-    // Emit — GeneratedMediator
+    // Emit — GeneratedMessageBus
     // ═════════════════════════════════════════════════════════════════════
 
-    private static string EmitMediator(List<HandlerInfo> handlers)
+    private static string EmitMessageBus(List<HandlerInfo> handlers)
     {
         var requests = handlers.Where(h => !h.IsNotification).ToList();
         var notificationGroups = handlers.Where(h => h.IsNotification)

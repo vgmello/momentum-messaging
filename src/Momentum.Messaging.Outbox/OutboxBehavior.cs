@@ -71,7 +71,7 @@ public sealed class OutboxBehavior<TRequest, TResponse> : IPipelineBehavior<TReq
         // Determine if the target handler is transactional.
         // The source generator knows the handler type for each request,
         // but at this level we check the attribute on TRequest's handler.
-        // The generated mediator resolves the handler — we inspect its type.
+        // The generated message bus resolves the handler — we inspect its type.
         var isTransactional = !IsNonTransactional(request);
 
         return isTransactional

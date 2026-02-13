@@ -4,7 +4,7 @@ namespace Momentum.Messaging.Abstractions;
 /// Publishes messages to a transport (Kafka, RabbitMQ, EventHubs, etc.).
 /// Each transport plugin provides an implementation.
 ///
-/// In normal flow, user code calls this directly or through the mediator.
+/// In normal flow, user code calls this directly or through the message bus.
 /// When the outbox is enabled, the outbox pipeline behavior captures
 /// publish calls and writes to the outbox table instead. The outbox
 /// background processor then calls the real transport publisher.

@@ -11,7 +11,7 @@ Momentum.Messaging is an incredibly lightweight, high-performance, low memory fo
 
 - **Best-in-class developer experience**
 - **Extensibility** — messaging technologies (Kafka, RabbitMQ, EventHub) added as plugins via common interfaces
-- **In-memory mediator** for local dispatch
+- **In-memory message bus** for local dispatch
 - **Resilience** — inbox/outbox patterns for messages arriving from external systems
 - **Dapper** for database operations (inbox/outbox persistence)
 - **Persistence packages as extensions** (SQL Server, PostgreSQL, etc.)
@@ -36,11 +36,11 @@ Override mechanisms:
 
 ### 2. Pure Source Generation (No Runtime Reflection Fallback)
 
-We explicitly rejected a reflection-based fallback mediator. The source generator is the only path. If the generator hasn't run, `AddMomentum()` throws at startup via `MomentumGeneratedHook`.
+We explicitly rejected a reflection-based fallback message bus. The source generator is the only path. If the generator hasn't run, `AddMomentum()` throws at startup via `MomentumGeneratedHook`.
 
 The generator emits:
 
-- `GeneratedMediator` with a `switch`-based dispatch table (zero reflection)
+- `GeneratedMessageBus` with a `switch`-based dispatch table (zero reflection)
 - `MomentumServiceRegistration` with all DI registrations
 - Uses `[ModuleInitializer]` to plug into `MomentumGeneratedHook`
 
@@ -94,7 +94,7 @@ All discovery configuration is compile-time only. No `IHandlerDiscoveryStrategy`
 
 ### 7. Outbox as Pipeline Behavior
 
-The outbox integrates as `OutboxBehavior<,>` — a pipeline behavior that wraps mediator handlers. NOT a decorator around `IMessagePublisher`.
+The outbox integrates as `OutboxBehavior<,>` — a pipeline behavior that wraps message bus handlers. NOT a decorator around `IMessagePublisher`.
 
 Flow:
 
@@ -110,7 +110,7 @@ The `OutboxBehavior` opens and commits/rolls back the DB transaction. Handlers n
 
 ### 9. Nested Handler Transaction Support
 
-When handler A calls `mediator.SendAsync()` which triggers handler B:
+When handler A calls `bus.SendAsync()` (via `IMessageBus`) which triggers handler B:
 
 - `OutboxTransactionAccessor` is scoped — tracks nesting depth
 - Transactional handlers join the ambient transaction (increment depth)
@@ -148,7 +148,7 @@ Given: Handler A (transactional) → Handler B (non-transactional) → Handler C
 ## Package Structure
 
 ```
-Momentum.Messaging                  ← core mediator, markers, builder, attributes
+Momentum.Messaging                  ← core message bus, IMessageContext, markers, builder, attributes
 Momentum.Messaging.Abstractions     ← transport contracts (zero deps)
 Momentum.Messaging.Generators       ← source generator (compile-time only)
 Momentum.Messaging.Outbox           ← outbox/inbox, behavior, processor
@@ -175,14 +175,15 @@ momentum-messaging/
 ├── src/
 │   ├── Momentum.Messaging/
 │   │   ├── Attributes.cs                    ← MomentumMediator, MomentumHandler, IgnoreHandler, suffixes, method names
-│   │   ├── IMediator.cs                     ← IMediator, INotificationPublishStrategy, strategies
+│   │   ├── IMessageBus.cs                    ← IMessageBus, INotificationPublishStrategy, strategies
+│   │   ├── IMessageContext.cs                ← IMessageContext (extends IMessageBus with ambient metadata)
 │   │   ├── IPipelineBehavior.cs             ← IPipelineBehavior, NextDelegate
 │   │   ├── Messages.cs                      ← IRequest<T>, IRequest, INotification, Unit
 │   │   ├── MomentumBuilder.cs               ← AddMomentum(), MomentumBuilder
 │   │   └── MomentumGeneratedHook.cs         ← Bridge for generated code
 │   │
 │   ├── Momentum.Messaging.Abstractions/
-│   │   ├── IMessageConsumer.cs              ← IMessageConsumer, IMessageProcessor, IMessageContext
+│   │   ├── IMessageConsumer.cs              ← IMessageConsumer, IMessageProcessor, IDeliveryContext
 │   │   ├── IMessagePublisher.cs             ← IMessagePublisher, PublishOptions
 │   │   ├── IMessageSerializer.cs            ← IMessageSerializer
 │   │   ├── IMessageTypeRegistry.cs          ← IMessageTypeRegistry, DefaultMessageTypeRegistry
@@ -209,7 +210,7 @@ momentum-messaging/
 │
 └── examples/
     └── Momentum.Messaging.Example/
-        ├── Program.cs                       ← Mediator usage, conventions, multi-suffix
+        ├── Program.cs                       ← Message bus usage, conventions, multi-suffix
         └── OutboxExample.cs                 ← Full outbox flow with nested handlers
 ```
 
@@ -223,7 +224,7 @@ The `MomentumSourceGenerator` (`IIncrementalGenerator`):
 2. **Configuration**: Reads from assembly attributes first, `.csproj` properties as fallback
 3. **Discovery**: Scans classes for suffix match + method name match, respects `[MomentumHandler]` and `[IgnoreHandler]`
 4. **Emits**:
-   - `MomentumMediator.g.cs` — `GeneratedMediator` with switch dispatch
+   - `MomentumMessageBus.g.cs` — `GeneratedMessageBus` with switch dispatch
    - `MomentumRegistration.g.cs` — DI registrations + `[ModuleInitializer]` hook
 5. **Diagnostics**:
    - `MOM001` (Warning): No handlers found
@@ -233,10 +234,12 @@ The `MomentumSourceGenerator` (`IIncrementalGenerator`):
 
 ## What's Been Built (Feature Sets 1 & 2)
 
-### Feature Set 1: In-Memory Mediator ✅
+### Feature Set 1: In-Memory Message Bus ✅
 
+- `IMessageBus` as primary dispatch interface (`SendAsync`, `PublishAsync`)
+- `IMessageContext` extends `IMessageBus` with ambient metadata (MessageId, CorrelationId, CausationId, Headers, etc.)
 - Convention-based handler discovery
-- Source generator with multi-suffix/multi-method support
+- Source generator with multi-suffix/multi-method support and scoped `IMessageContext` injection
 - Pipeline behaviors (middleware)
 - Notification publish strategies (sequential, parallel)
 - Assembly attribute + .csproj configuration
@@ -244,7 +247,7 @@ The `MomentumSourceGenerator` (`IIncrementalGenerator`):
 ### Feature Set 2: Transport Abstractions + Outbox/Inbox ✅
 
 - `MessageEnvelope` wire format
-- `IMessagePublisher` / `IMessageConsumer` contracts
+- `IMessagePublisher` / `IMessageConsumer` / `IDeliveryContext` contracts
 - `IMessageSerializer` (pluggable, no default)
 - `IMessageTypeRegistry` for deserialization routing
 - `OutboxBehavior<,>` with transaction ownership

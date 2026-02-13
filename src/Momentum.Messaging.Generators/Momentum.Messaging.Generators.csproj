@@ -4,7 +4,7 @@
     <TargetFramework>netstandard2.0</TargetFramework>
     <RootNamespace>Momentum.Messaging.Generators</RootNamespace>
     <PackageId>Momentum.Messaging.Generators</PackageId>
-    <Description>Source generator for Momentum.Messaging. Emits zero-reflection mediator dispatch at compile time.</Description>
+    <Description>Source generator for Momentum.Messaging. Emits zero-reflection message bus dispatch at compile time.</Description>
 
     <IsRoslynComponent>true</IsRoslynComponent>
     <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>

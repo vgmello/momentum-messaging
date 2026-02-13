@@ -81,7 +81,7 @@ public sealed class MomentumBuilder
                 "Momentum source generator has not run. " +
                 "Ensure Momentum.Messaging.Generators is referenced and [assembly: MomentumMediator] is present.");
 
-        // The generated code registers handlers, mediator, AND closed generic
+        // The generated code registers handlers, message bus, AND closed generic
         // behavior registrations (AOT-safe). We pass the open generic types
         // so the generated code can emit closed versions for each request type.
         MomentumGeneratedHook.RegistrationAction(_services, _handlerLifetime, _behaviorTypes);
