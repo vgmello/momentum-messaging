@@ -16,6 +16,7 @@ Momentum.Messaging is an incredibly lightweight, high-performance, low memory fo
 - **Dapper** for database operations (inbox/outbox persistence)
 - **Persistence packages as extensions** (SQL Server, PostgreSQL, etc.)
 - **Source generation over reflection** — zero runtime reflection, everything compile-time
+- **AOT ready** out of the box
 
 ---
 
@@ -299,8 +300,21 @@ The `MomentumSourceGenerator` (`IIncrementalGenerator`):
 
 ---
 
-## GitHub Repo
+## AOT Readiness
 
-https://github.com/vgmello/momentum-messaging
+The framework is designed to be fully Native AOT compatible. Changes made:
 
-Code has been packaged for push — see the zip file exported from this session.
+### What's Already AOT-Safe by Design
+
+- Source-generated mediator dispatch (switch statement, concrete types)
+- Convention handlers registered as concrete types in DI
+- No `dynamic`, no expression compilation, no `Assembly.GetTypes()`
+
+### Remaining AOT Consideration
+
+The `MakeGenericType` call in the generated registration is AOT-safe because:
+
+- Type arguments are compile-time constants emitted by the generator
+- The closed generic types are statically referenced in the generated mediator's switch dispatch
+- The DI container sees concrete service descriptors
+- Future improvement: eliminate `MakeGenericType` entirely by having the generator emit fully closed `ServiceDescriptor` registrations per behavior × request pair (requires knowing behavior types at compile time via attributes)

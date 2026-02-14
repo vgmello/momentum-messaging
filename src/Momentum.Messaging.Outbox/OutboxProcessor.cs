@@ -89,7 +89,7 @@ public sealed class OutboxProcessor : BackgroundService
         var headers = MessageHeaders.Empty;
         if (msg.Headers is not null)
         {
-            var dict = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(msg.Headers);
+            var dict = System.Text.Json.JsonSerializer.Deserialize(msg.Headers, OutboxJsonContext.Default.DictionaryStringString);
             if (dict is not null)
                 headers = new MessageHeaders(dict);
         }

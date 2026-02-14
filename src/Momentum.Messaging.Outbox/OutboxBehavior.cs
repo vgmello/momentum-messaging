@@ -213,7 +213,7 @@ public sealed class OutboxBehavior<TRequest, TResponse> : IPipelineBehavior<TReq
                 PartitionKey = collected.Options.PartitionKey,
                 Payload = payload.ToArray(),
                 Headers = collected.Options.Headers.Count > 0
-                    ? JsonSerializer.Serialize(collected.Options.Headers)
+                    ? JsonSerializer.Serialize(collected.Options.Headers, OutboxJsonContext.Default.DictionaryStringString)
                     : null,
                 CorrelationId = collected.Options.CorrelationId,
                 CausationId = collected.Options.CausationId,

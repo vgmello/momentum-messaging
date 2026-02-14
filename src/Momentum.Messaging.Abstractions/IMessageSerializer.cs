@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace Momentum.Messaging.Abstractions;
 
 /// <summary>
@@ -10,13 +12,13 @@ public interface IMessageSerializer
     ReadOnlyMemory<byte> Serialize<TMessage>(TMessage message) where TMessage : class;
 
     /// <summary>Serialize a message to bytes using the runtime type.</summary>
-    ReadOnlyMemory<byte> Serialize(object message, Type messageType);
+    ReadOnlyMemory<byte> Serialize(object message, [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)] Type messageType);
 
     /// <summary>Deserialize bytes to a typed message.</summary>
     TMessage Deserialize<TMessage>(ReadOnlyMemory<byte> payload) where TMessage : class;
 
     /// <summary>Deserialize bytes to an object given the type.</summary>
-    object Deserialize(ReadOnlyMemory<byte> payload, Type messageType);
+    object Deserialize(ReadOnlyMemory<byte> payload, [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)] Type messageType);
 
     /// <summary>Content type for transport headers (e.g., "application/json").</summary>
     string ContentType { get; }

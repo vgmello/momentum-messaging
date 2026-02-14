@@ -38,8 +38,7 @@ public class DefaultMessageTypeRegistry : IMessageTypeRegistry
     }
 
     public Type? Resolve(string messageTypeName)
-        => _nameToType.GetValueOrDefault(messageTypeName)
-           ?? Type.GetType(messageTypeName); // Fallback to assembly-qualified
+        => _nameToType.GetValueOrDefault(messageTypeName);
 
     public string GetName(Type messageType)
         => _typeToName.GetValueOrDefault(messageType)

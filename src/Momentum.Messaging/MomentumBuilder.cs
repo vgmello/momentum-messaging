@@ -29,6 +29,12 @@ public sealed class MomentumBuilder
 
     // -- Behaviors --
 
+    /// <summary>
+    /// Register an open-generic pipeline behavior.
+    /// The source generator emits closed generic registrations for AOT compatibility.
+    /// At runtime, open generic registration is used as a fallback for DI containers
+    /// that support it natively.
+    /// </summary>
     public MomentumBuilder AddBehavior(Type openGenericBehaviorType)
     {
         if (!openGenericBehaviorType.IsGenericTypeDefinition)
@@ -37,6 +43,8 @@ public sealed class MomentumBuilder
         _behaviorTypes.Add(openGenericBehaviorType);
         return this;
     }
+
+    internal IReadOnlyList<Type> BehaviorTypes => _behaviorTypes;
 
     // -- Notification strategy --
 
@@ -66,17 +74,14 @@ public sealed class MomentumBuilder
     {
         _services.TryAddSingleton(typeof(INotificationPublishStrategy), _publishStrategyType);
 
-        foreach (var behaviorType in _behaviorTypes)
-        {
-            _services.Add(new ServiceDescriptor(
-                typeof(IPipelineBehavior<,>), behaviorType, _handlerLifetime));
-        }
-
         if (MomentumGeneratedHook.RegistrationAction is null)
             throw new InvalidOperationException(
                 "Momentum source generator has not run. " +
                 "Ensure Momentum.Messaging.Generators is referenced and [assembly: MomentumMediator] is present.");
 
-        MomentumGeneratedHook.RegistrationAction(_services, _handlerLifetime);
+        // The generated code registers handlers, mediator, AND closed generic
+        // behavior registrations (AOT-safe). We pass the open generic types
+        // so the generated code can emit closed versions for each request type.
+        MomentumGeneratedHook.RegistrationAction(_services, _handlerLifetime, _behaviorTypes);
     }
 }

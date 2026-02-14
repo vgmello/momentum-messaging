@@ -8,5 +8,9 @@ namespace Momentum.Messaging;
 /// </summary>
 public static class MomentumGeneratedHook
 {
-    public static Action<IServiceCollection, ServiceLifetime>? RegistrationAction { get; set; }
+    /// <summary>
+    /// Set by the source-generated ModuleInitializer.
+    /// Parameters: services, handler lifetime, behavior open generic types.
+    /// </summary>
+    public static Action<IServiceCollection, ServiceLifetime, IReadOnlyList<Type>>? RegistrationAction { get; set; }
 }
