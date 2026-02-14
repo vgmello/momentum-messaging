@@ -1,0 +1,7 @@
+<Project>
+  <ItemGroup>
+    <CompilerVisibleProperty Include="MomentumHandlerSuffix" />
+    <CompilerVisibleProperty Include="MomentumMethodName" />
+    <CompilerVisibleProperty Include="MomentumDiscoveryStrategy" />
+  </ItemGroup>
+</Project>

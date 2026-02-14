@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Momentum.Messaging\Momentum.Messaging.csproj" />
+    <ProjectReference Include="..\..\src\Momentum.Messaging.Abstractions\Momentum.Messaging.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Momentum.Messaging.Outbox\Momentum.Messaging.Outbox.csproj" />
+    <ProjectReference Include="..\..\src\Momentum.Messaging.Generators\Momentum.Messaging.Generators.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <!-- Strategy configuration (uncomment to customize) -->
+  <!--
+  <PropertyGroup>
+    <MomentumHandlerSuffix>Handler;Processor;Consumer</MomentumHandlerSuffix>
+    <MomentumMethodName>HandleAsync;ExecuteAsync</MomentumMethodName>
+  </PropertyGroup>
+  -->
+
+</Project>

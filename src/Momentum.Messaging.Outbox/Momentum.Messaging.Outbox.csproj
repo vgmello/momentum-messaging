@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Momentum.Messaging.Outbox</RootNamespace>
+    <PackageId>Momentum.Messaging.Outbox</PackageId>
+    <Description>Transactional outbox/inbox pattern for Momentum.Messaging.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Momentum.Messaging\Momentum.Messaging.csproj" />
+    <ProjectReference Include="..\Momentum.Messaging.Abstractions\Momentum.Messaging.Abstractions.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="9.0.*" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.*" />
+  </ItemGroup>
+
+</Project>
