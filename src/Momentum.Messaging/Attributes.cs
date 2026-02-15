@@ -1,0 +1,97 @@
+namespace Momentum.Messaging;
+
+/// <summary>
+/// Triggers source generation for this assembly.
+/// </summary>
+[AttributeUsage(AttributeTargets.Assembly)]
+public sealed class MomentumMediatorAttribute : Attribute;
+
+/// <summary>
+/// Explicitly marks a class as a handler, overriding convention-based discovery.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class MomentumHandlerAttribute : Attribute;
+
+/// <summary>
+/// Excludes a class from handler discovery even if it matches conventions.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class IgnoreHandlerAttribute : Attribute;
+
+/// <summary>
+/// Adds a handler class suffix to the discovery conventions.
+/// Multiple attributes can be applied. Default is "Handler" if none specified.
+/// </summary>
+/// <example>
+/// <code>
+/// [assembly: MomentumMediator]
+/// [assembly: MomentumHandlerSuffix("Handler")]
+/// [assembly: MomentumHandlerSuffix("Processor")]
+/// [assembly: MomentumHandlerSuffix("Consumer")]
+/// </code>
+/// </example>
+[AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)]
+public sealed class MomentumHandlerSuffixAttribute : Attribute
+{
+    public string Suffix { get; }
+    public MomentumHandlerSuffixAttribute(string suffix) => Suffix = suffix;
+}
+
+/// <summary>
+/// Adds a handler method name to the discovery conventions.
+/// Multiple attributes can be applied. Default is "HandleAsync" if none specified.
+/// </summary>
+/// <example>
+/// <code>
+/// [assembly: MomentumMediator]
+/// [assembly: MomentumMethodName("HandleAsync")]
+/// [assembly: MomentumMethodName("ExecuteAsync")]
+/// </code>
+/// </example>
+[AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)]
+public sealed class MomentumMethodNameAttribute : Attribute
+{
+    public string Name { get; }
+    public MomentumMethodNameAttribute(string name) => Name = name;
+}
+
+/// <summary>
+/// Replaces the default suffix-based discovery with a fully custom strategy.
+/// The specified type must implement IHandlerDiscoveryStrategy and have a
+/// parameterless constructor. The generator will instantiate it at compile time.
+/// </summary>
+/// <example>
+/// <code>
+/// [assembly: MomentumMediator]
+/// [assembly: MomentumDiscoveryStrategy(typeof(MyCustomDiscoveryStrategy))]
+/// </code>
+/// </example>
+[AttributeUsage(AttributeTargets.Assembly)]
+public sealed class MomentumDiscoveryStrategyAttribute : Attribute
+{
+    public Type StrategyType { get; }
+    public MomentumDiscoveryStrategyAttribute(Type strategyType) => StrategyType = strategyType;
+}
+
+/// <summary>
+/// Handler creates a DI scope per dispatch. This is the default lifetime.
+/// Services injected via constructor or method parameters are resolved from the scope.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class ScopedHandlerAttribute : Attribute;
+
+/// <summary>
+/// Handler instance is cached as a singleton. Constructor services are resolved once.
+/// Method-injected services are resolved from the root provider per call.
+/// Scoped services (e.g., DbContext) injected via method parameters will fail at runtime
+/// because they cannot be resolved from the root provider without a scope.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class SingletonHandlerAttribute : Attribute;
+
+/// <summary>
+/// Handler is constructed per dispatch without creating a DI scope.
+/// Services are resolved from the root provider.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class TransientHandlerAttribute : Attribute;

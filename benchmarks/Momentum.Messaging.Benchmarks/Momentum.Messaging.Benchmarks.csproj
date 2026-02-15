@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- Benchmarks are not shipped — relax AOT/trim for MediatR compatibility -->
+    <IsAotCompatible>false</IsAotCompatible>
+    <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Momentum.Messaging\Momentum.Messaging.csproj" />
+    <ProjectReference Include="..\..\src\Momentum.Messaging.Abstractions\Momentum.Messaging.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Momentum.Messaging.Generators\Momentum.Messaging.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" Version="0.14.*" />
+    <PackageReference Include="MediatR" Version="12.*" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.*" />
+  </ItemGroup>
+
+</Project>
