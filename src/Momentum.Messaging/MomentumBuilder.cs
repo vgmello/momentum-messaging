@@ -1,4 +1,3 @@
-using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -23,7 +22,6 @@ public sealed class MomentumBuilder
     private readonly IServiceCollection _services;
     private readonly List<Type> _behaviorTypes = [];
     private ServiceLifetime _handlerLifetime = ServiceLifetime.Transient;
-    private bool _scopedDispatch;
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)]
     private Type _publishStrategyType = typeof(SequentialStrategy);
 
@@ -64,18 +62,6 @@ public sealed class MomentumBuilder
         return this;
     }
 
-    // -- Scoped dispatch --
-
-    /// <summary>
-    /// Enable DI scope creation per dispatch. Required when using scoped services
-    /// (e.g., outbox/transactional patterns). Off by default for maximum throughput.
-    /// </summary>
-    public MomentumBuilder UseScopedDispatch()
-    {
-        _scopedDispatch = true;
-        return this;
-    }
-
     // -- Lifetime --
 
     public MomentumBuilder WithHandlerLifetime(ServiceLifetime lifetime)
@@ -95,20 +81,9 @@ public sealed class MomentumBuilder
                 "Momentum source generator has not run. " +
                 "Ensure Momentum.Messaging.Generators is referenced and [assembly: MomentumMediator] is present.");
 
-        // The generated code registers handlers, message bus, AND closed generic
+        // The generated code registers the message bus AND closed generic
         // behavior registrations (AOT-safe). We pass the open generic types
         // so the generated code can emit closed versions for each request type.
-        var options = new MomentumOptions { ScopedDispatch = _scopedDispatch };
-        MomentumGeneratedHook.RegistrationAction(_services, _handlerLifetime, _behaviorTypes, options);
+        MomentumGeneratedHook.RegistrationAction(_services, _handlerLifetime, _behaviorTypes);
     }
-}
-
-/// <summary>
-/// Options passed from <see cref="MomentumBuilder"/> to the generated registration code.
-/// </summary>
-[EditorBrowsable(EditorBrowsableState.Never)]
-public sealed class MomentumOptions
-{
-    /// <summary>Whether to create a DI scope per dispatch.</summary>
-    public bool ScopedDispatch { get; set; }
 }

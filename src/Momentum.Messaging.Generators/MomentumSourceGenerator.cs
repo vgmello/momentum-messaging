@@ -15,6 +15,9 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
     private const string HandlerSuffixAttr = "Momentum.Messaging.MomentumHandlerSuffixAttribute";
     private const string MethodNameAttr = "Momentum.Messaging.MomentumMethodNameAttribute";
     private const string DiscoveryStrategyAttr = "Momentum.Messaging.MomentumDiscoveryStrategyAttribute";
+    private const string ScopedHandlerAttr = "Momentum.Messaging.ScopedHandlerAttribute";
+    private const string SingletonHandlerAttr = "Momentum.Messaging.SingletonHandlerAttribute";
+    private const string TransientHandlerAttr = "Momentum.Messaging.TransientHandlerAttribute";
     private const string IRequestGeneric = "Momentum.Messaging.IRequest<TResponse>";
     private const string INotificationFull = "Momentum.Messaging.INotification";
     private const string UnitFull = "Momentum.Messaging.Unit";
@@ -180,16 +183,6 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         ImmutableArray<INamedTypeSymbol> candidates,
         GeneratorConfig config)
     {
-        // If a custom strategy is specified, we can't invoke it at compile time
-        // from the generator directly (it's user code, not analyzer code).
-        // Instead, we emit a diagnostic telling the user that custom strategies
-        // require their strategy to be in a separate analyzer-compatible assembly,
-        // OR they use the attribute/csproj approach for suffix+method configuration.
-        //
-        // For the vast majority of cases, multi-suffix + multi-method covers it.
-        // The custom strategy attribute is reserved for future extensibility where
-        // the strategy assembly is loaded as an analyzer dependency.
-
         var handlers = new List<HandlerInfo>();
 
         foreach (var symbol in candidates)
@@ -204,24 +197,25 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
             if (!matchesSuffix && !hasExplicitAttr)
                 continue;
 
-            // Find matching methods across ALL configured method names
+            // Find matching methods across ALL configured method names (static and instance)
             var methods = symbol.GetMembers()
                 .OfType<IMethodSymbol>()
                 .Where(m => config.MethodNames.Contains(m.Name) &&
-                            m.DeclaredAccessibility == Accessibility.Public &&
-                            !m.IsStatic);
+                            m.DeclaredAccessibility == Accessibility.Public);
 
             foreach (var method in methods)
             {
                 var parameters = method.Parameters;
-                if (parameters.Length == 0 || parameters.Length > 3)
+                if (parameters.Length == 0)
                     continue;
 
                 var messageType = parameters[0].Type;
                 var hasContext = false;
                 var hasCt = false;
+                var methodServices = new List<ServiceParam>();
 
-                // Parse remaining params: optional IMessageContext then optional CancellationToken (order enforced)
+                // Parse remaining params: IMessageContext, CancellationToken, and unknown types as method services
+                // Order enforced: message, [services...], [IMessageContext], [CancellationToken]
                 var valid = true;
                 for (var p = 1; p < parameters.Length; p++)
                 {
@@ -230,6 +224,15 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
                         hasContext = true;
                     else if (pType == "System.Threading.CancellationToken")
                         hasCt = true;
+                    else if (!hasContext && !hasCt)
+                    {
+                        // Unknown type before context/ct — treat as method-injected service
+                        methodServices.Add(new ServiceParam
+                        {
+                            TypeFullName = pType,
+                            ParamName = parameters[p].Name,
+                        });
+                    }
                     else
                     {
                         valid = false;
@@ -239,6 +242,41 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
 
                 if (!valid)
                     continue;
+
+                // Determine if this is a static handler
+                var isStatic = method.IsStatic && symbol.IsStatic;
+
+                // Determine lifetime from attributes
+                HandlerLifetime lifetime;
+                if (HasAttribute(symbol, SingletonHandlerAttr))
+                    lifetime = HandlerLifetime.Singleton;
+                else if (HasAttribute(symbol, TransientHandlerAttr))
+                    lifetime = HandlerLifetime.Transient;
+                else if (HasAttribute(symbol, ScopedHandlerAttr))
+                    lifetime = HandlerLifetime.Scoped;
+                else
+                    lifetime = isStatic ? HandlerLifetime.Transient : HandlerLifetime.Scoped;
+
+                // Collect constructor services for instance handlers
+                var ctorServices = new List<ServiceParam>();
+                if (!isStatic)
+                {
+                    var ctors = symbol.InstanceConstructors
+                        .Where(c => c.DeclaredAccessibility == Accessibility.Public && !c.IsImplicitlyDeclared)
+                        .ToList();
+
+                    if (ctors.Count == 1)
+                    {
+                        foreach (var cp in ctors[0].Parameters)
+                        {
+                            ctorServices.Add(new ServiceParam
+                            {
+                                TypeFullName = cp.Type.ToDisplayString(),
+                                ParamName = cp.Name,
+                            });
+                        }
+                    }
+                }
 
                 // Notification
                 if (ImplementsInterface(messageType, INotificationFull))
@@ -254,6 +292,11 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
                         IsNotification = true,
                         HasContextParam = hasContext,
                         HasCancellationToken = hasCt,
+                        ReturnsVoidTask = true,
+                        IsStatic = isStatic,
+                        Lifetime = lifetime,
+                        CtorServices = ctorServices,
+                        MethodServices = methodServices,
                     });
                     continue;
                 }
@@ -279,6 +322,10 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
                         HasContextParam = hasContext,
                         HasCancellationToken = hasCt,
                         ReturnsVoidTask = returnsVoidTask,
+                        IsStatic = isStatic,
+                        Lifetime = lifetime,
+                        CtorServices = ctorServices,
+                        MethodServices = methodServices,
                     });
                 }
             }
@@ -291,6 +338,12 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
     // Emit — GeneratedMessageBus
     // ═════════════════════════════════════════════════════════════════════
 
+    private static string SanitizeTypeName(string fullName)
+    {
+        // Convert "Namespace.TypeName" -> "Namespace_TypeName" for use as method/field names
+        return fullName.Replace('.', '_').Replace('<', '_').Replace('>', '_').Replace(',', '_').Replace(' ', '_');
+    }
+
     private static string EmitMessageBus(List<HandlerInfo> handlers)
     {
         var requests = handlers.Where(h => !h.IsNotification).ToList();
@@ -298,10 +351,17 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
             .GroupBy(h => h.MessageTypeFullName)
             .ToList();
 
+        // Collect singleton handlers that need fields
+        var singletonHandlers = handlers
+            .Where(h => h.Lifetime == HandlerLifetime.Singleton && !h.IsStatic)
+            .GroupBy(h => h.HandlerTypeFullName)
+            .ToList();
+
         var sb = new StringBuilder(8192);
         sb.AppendLine("// <auto-generated />");
         sb.AppendLine("#nullable enable");
         sb.AppendLine();
+        sb.AppendLine("using System.Runtime.CompilerServices;");
         sb.AppendLine("using Microsoft.Extensions.DependencyInjection;");
         sb.AppendLine("using Momentum.Messaging;");
         sb.AppendLine();
@@ -311,96 +371,50 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("{");
         sb.AppendLine("    private readonly IServiceProvider _sp;");
         sb.AppendLine("    private readonly INotificationPublishStrategy _publishStrategy;");
-        sb.AppendLine("    private readonly bool _scopedDispatch;");
         sb.AppendLine("    internal static bool HasBehaviors;");
+
+        // Emit singleton handler fields
+        foreach (var group in singletonHandlers)
+        {
+            var fieldName = "_singleton_" + SanitizeTypeName(group.Key);
+            sb.AppendLine($"    private {group.Key}? {fieldName};");
+        }
+
         sb.AppendLine();
-        sb.AppendLine("    public GeneratedMessageBus(IServiceProvider sp, INotificationPublishStrategy publishStrategy, MomentumOptions options)");
+        sb.AppendLine("    public GeneratedMessageBus(IServiceProvider sp, INotificationPublishStrategy publishStrategy)");
         sb.AppendLine("    {");
         sb.AppendLine("        _sp = sp;");
         sb.AppendLine("        _publishStrategy = publishStrategy;");
-        sb.AppendLine("        _scopedDispatch = options.ScopedDispatch;");
         sb.AppendLine("    }");
         sb.AppendLine();
 
-        // ── SendAsync ──
-        sb.AppendLine("    public async Task<TResponse> SendAsync<TResponse>(IRequest<TResponse> request, CancellationToken ct = default)");
+        // ── Emit private typed dispatch methods for each request handler ──
+        foreach (var req in requests)
+        {
+            var dispatchName = "Dispatch_" + SanitizeTypeName(req.MessageTypeFullName);
+            EmitTypedDispatchMethod(sb, req, dispatchName);
+        }
+
+        // ── SendAsync ── (non-async, returns Task<TResponse> via Unsafe.As)
+        sb.AppendLine("    public Task<TResponse> SendAsync<TResponse>(IRequest<TResponse> request, CancellationToken ct = default)");
         sb.AppendLine("    {");
-        sb.AppendLine("        var diScope = _scopedDispatch ? _sp.CreateScope() : null;");
-        sb.AppendLine("        var sp = diScope?.ServiceProvider ?? _sp;");
-        sb.AppendLine("        try");
+        sb.AppendLine("        switch (request)");
         sb.AppendLine("        {");
-        sb.AppendLine("            switch (request)");
-        sb.AppendLine("            {");
 
         foreach (var req in requests)
         {
-            sb.AppendLine($"                case {req.MessageTypeFullName} msg:");
-            sb.AppendLine("                {");
-
-            if (req.HasContextParam)
-            {
-                // Context-using handler: create scope + try/finally inside case
-                sb.AppendLine("                    var ctx = new MessageContextScope(this, MessageContextScope.Current);");
-                sb.AppendLine("                    var previous = MessageContextScope.SetCurrent(ctx);");
-                sb.AppendLine("                    try");
-                sb.AppendLine("                    {");
-
-                var handlerCall = BuildHandlerCall(req, "msg");
-                sb.AppendLine($"                        var handler = sp.GetRequiredService<{req.HandlerTypeFullName}>();");
-
-                // Fast path: no behaviors
-                sb.AppendLine("                        if (!HasBehaviors)");
-                if (req.ReturnsVoidTask)
-                {
-                    sb.AppendLine("                        {");
-                    sb.AppendLine($"                            await {handlerCall}.ConfigureAwait(false);");
-                    sb.AppendLine($"                            return (TResponse)(object){UnitFull}.Value;");
-                    sb.AppendLine("                        }");
-                }
-                else
-                {
-                    sb.AppendLine($"                            return (TResponse)(object)await {handlerCall}.ConfigureAwait(false);");
-                }
-
-                // Behavior pipeline
-                EmitBehaviorPipeline(sb, req, handlerCall, "                        ");
-
-                sb.AppendLine("                    }");
-                sb.AppendLine("                    finally { MessageContextScope.RestoreCurrent(previous); }");
-            }
-            else
-            {
-                // No context needed: direct handler call
-                var handlerCall = BuildHandlerCall(req, "msg");
-                sb.AppendLine($"                    var handler = sp.GetRequiredService<{req.HandlerTypeFullName}>();");
-
-                // Fast path: no behaviors
-                sb.AppendLine("                    if (!HasBehaviors)");
-                if (req.ReturnsVoidTask)
-                {
-                    sb.AppendLine("                    {");
-                    sb.AppendLine($"                        await {handlerCall}.ConfigureAwait(false);");
-                    sb.AppendLine($"                        return (TResponse)(object){UnitFull}.Value;");
-                    sb.AppendLine("                    }");
-                }
-                else
-                {
-                    sb.AppendLine($"                        return (TResponse)(object)await {handlerCall}.ConfigureAwait(false);");
-                }
-
-                // Behavior pipeline
-                EmitBehaviorPipeline(sb, req, handlerCall, "                    ");
-            }
-
-            sb.AppendLine("                }");
+            var dispatchName = "Dispatch_" + SanitizeTypeName(req.MessageTypeFullName);
+            sb.AppendLine($"            case {req.MessageTypeFullName} msg:");
+            sb.AppendLine("            {");
+            sb.AppendLine($"                var task = {dispatchName}(msg, ct);");
+            sb.AppendLine($"                return Unsafe.As<Task<{req.ResponseTypeFullName}>, Task<TResponse>>(ref task);");
+            sb.AppendLine("            }");
         }
 
-        sb.AppendLine("                default:");
-        sb.AppendLine("                    throw new InvalidOperationException(");
-        sb.AppendLine("                        $\"No handler found for {request.GetType().Name}. Ensure a handler follows Momentum conventions.\");");
-        sb.AppendLine("            }");
+        sb.AppendLine("            default:");
+        sb.AppendLine("                throw new InvalidOperationException(");
+        sb.AppendLine("                    $\"No handler found for {request.GetType().Name}. Ensure a handler follows Momentum conventions.\");");
         sb.AppendLine("        }");
-        sb.AppendLine("        finally { diScope?.Dispose(); }");
         sb.AppendLine("    }");
         sb.AppendLine();
 
@@ -408,33 +422,28 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("    public async Task PublishAsync<TNotification>(TNotification notification, CancellationToken ct = default)");
         sb.AppendLine("        where TNotification : INotification");
         sb.AppendLine("    {");
-        sb.AppendLine("        var diScope = _scopedDispatch ? _sp.CreateScope() : null;");
-        sb.AppendLine("        var sp = diScope?.ServiceProvider ?? _sp;");
-        sb.AppendLine("        try");
-        sb.AppendLine("        {");
 
         foreach (var group in notificationGroups)
         {
             var anyNeedsContext = group.Any(h => h.HasContextParam);
 
-            sb.AppendLine($"            if (notification is {group.Key} typedNotification)");
-            sb.AppendLine("            {");
+            sb.AppendLine($"        if (notification is {group.Key} typedNotification)");
+            sb.AppendLine("        {");
 
             if (anyNeedsContext)
             {
-                sb.AppendLine("                var ctx = new MessageContextScope(this, MessageContextScope.Current);");
-                sb.AppendLine("                var previous = MessageContextScope.SetCurrent(ctx);");
-                sb.AppendLine("                try");
-                sb.AppendLine("                {");
+                sb.AppendLine("            var ctx = new MessageContextScope(this, MessageContextScope.Current);");
+                sb.AppendLine("            var previous = MessageContextScope.SetCurrent(ctx);");
+                sb.AppendLine("            try");
+                sb.AppendLine("            {");
             }
 
-            var indent = anyNeedsContext ? "                    " : "                ";
+            var indent = anyNeedsContext ? "                " : "            ";
             sb.AppendLine($"{indent}var handlers = new Func<{group.Key}, CancellationToken, Task>[]");
             sb.AppendLine($"{indent}{{");
             foreach (var h in group)
             {
-                var notifCall = BuildNotificationHandlerCall(h);
-                sb.AppendLine($"{indent}    (n, c) => {{ var h = sp.GetRequiredService<{h.HandlerTypeFullName}>(); return {notifCall}; }},");
+                EmitNotificationHandlerLambda(sb, h, indent + "    ");
             }
             sb.AppendLine($"{indent}}};");
             sb.AppendLine($"{indent}await _publishStrategy.PublishAsync(");
@@ -443,25 +452,177 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
 
             if (anyNeedsContext)
             {
-                sb.AppendLine("                }");
-                sb.AppendLine("                finally { MessageContextScope.RestoreCurrent(previous); }");
+                sb.AppendLine("            }");
+                sb.AppendLine("            finally { MessageContextScope.RestoreCurrent(previous); }");
             }
 
-            sb.AppendLine("                return;");
-            sb.AppendLine("            }");
+            sb.AppendLine("            return;");
+            sb.AppendLine("        }");
         }
 
-        sb.AppendLine("        }");
-        sb.AppendLine("        finally { diScope?.Dispose(); }");
         sb.AppendLine("    }");
+
+        // ── Emit private typed dispatch methods for each notification group ──
+        // (not needed — notification handlers are emitted inline in lambdas)
+
         sb.AppendLine("}");
 
         return sb.ToString();
     }
 
-    private static void EmitBehaviorPipeline(StringBuilder sb, HandlerInfo req, string handlerCall, string indent)
+    private static void EmitTypedDispatchMethod(StringBuilder sb, HandlerInfo req, string dispatchName)
     {
-        sb.AppendLine($"{indent}var behaviors = sp.GetServices<IPipelineBehavior<{req.MessageTypeFullName}, {req.ResponseTypeFullName}>>();");
+        sb.AppendLine($"    private async Task<{req.ResponseTypeFullName}> {dispatchName}({req.MessageTypeFullName} msg, CancellationToken ct)");
+        sb.AppendLine("    {");
+
+        // Determine if we need a scope
+        var needsScope = req.Lifetime == HandlerLifetime.Scoped;
+        // Static handlers with method services that are scoped might also need scope
+        var staticWithScopedServices = req.IsStatic && req.MethodServices.Count > 0 && req.Lifetime == HandlerLifetime.Scoped;
+        if (staticWithScopedServices)
+            needsScope = true;
+
+        var indent = "        ";
+
+        if (needsScope)
+        {
+            sb.AppendLine($"{indent}using var scope = _sp.CreateScope();");
+            sb.AppendLine($"{indent}var sp = scope.ServiceProvider;");
+        }
+
+        // Context setup
+        if (req.HasContextParam)
+        {
+            sb.AppendLine($"{indent}var ctx = new MessageContextScope(this, MessageContextScope.Current);");
+            sb.AppendLine($"{indent}var previous = MessageContextScope.SetCurrent(ctx);");
+            sb.AppendLine($"{indent}try");
+            sb.AppendLine($"{indent}{{");
+            indent = "            ";
+        }
+
+        // Resolve method services
+        var spRef = needsScope ? "sp" : "_sp";
+        foreach (var svc in req.MethodServices)
+        {
+            sb.AppendLine($"{indent}var {svc.ParamName} = {spRef}.GetRequiredService<{svc.TypeFullName}>();");
+        }
+
+        // Build handler + call
+        string handlerCallExpr;
+        if (req.IsStatic)
+        {
+            // Static handler: call directly
+            handlerCallExpr = BuildStaticHandlerCall(req, "msg");
+        }
+        else
+        {
+            // Instance handler: construct manually
+            EmitHandlerConstruction(sb, req, indent, spRef);
+            handlerCallExpr = BuildInstanceHandlerCall(req, "msg");
+        }
+
+        // Fast path: no behaviors
+        sb.AppendLine($"{indent}if (!HasBehaviors)");
+        if (req.ReturnsVoidTask)
+        {
+            sb.AppendLine($"{indent}{{");
+            sb.AppendLine($"{indent}    await {handlerCallExpr}.ConfigureAwait(false);");
+            sb.AppendLine($"{indent}    return {UnitFull}.Value;");
+            sb.AppendLine($"{indent}}}");
+        }
+        else
+        {
+            sb.AppendLine($"{indent}    return await {handlerCallExpr}.ConfigureAwait(false);");
+        }
+
+        // Behavior pipeline
+        EmitBehaviorPipeline(sb, req, handlerCallExpr, indent, spRef);
+
+        // Close context try/finally
+        if (req.HasContextParam)
+        {
+            sb.AppendLine("        }");
+            sb.AppendLine("        finally { MessageContextScope.RestoreCurrent(previous); }");
+        }
+
+        sb.AppendLine("    }");
+        sb.AppendLine();
+    }
+
+    private static void EmitHandlerConstruction(StringBuilder sb, HandlerInfo req, string indent, string spRef)
+    {
+        var fieldName = "_singleton_" + SanitizeTypeName(req.HandlerTypeFullName);
+
+        switch (req.Lifetime)
+        {
+            case HandlerLifetime.Singleton:
+                // Cached in field, lazy init
+                if (req.CtorServices.Count == 0)
+                {
+                    sb.AppendLine($"{indent}var handler = {fieldName} ??= new {req.HandlerTypeFullName}();");
+                }
+                else
+                {
+                    var ctorArgs = string.Join(", ", req.CtorServices.Select(s => $"_sp.GetRequiredService<{s.TypeFullName}>()"));
+                    sb.AppendLine($"{indent}var handler = {fieldName} ??= new {req.HandlerTypeFullName}({ctorArgs});");
+                }
+                break;
+
+            case HandlerLifetime.Transient:
+                // New each time, no scope
+                if (req.CtorServices.Count == 0)
+                {
+                    sb.AppendLine($"{indent}var handler = new {req.HandlerTypeFullName}();");
+                }
+                else
+                {
+                    var ctorArgs = string.Join(", ", req.CtorServices.Select(s => $"_sp.GetRequiredService<{s.TypeFullName}>()"));
+                    sb.AppendLine($"{indent}var handler = new {req.HandlerTypeFullName}({ctorArgs});");
+                }
+                break;
+
+            case HandlerLifetime.Scoped:
+                // New each time, resolve from scope
+                if (req.CtorServices.Count == 0)
+                {
+                    sb.AppendLine($"{indent}var handler = new {req.HandlerTypeFullName}();");
+                }
+                else
+                {
+                    var ctorArgs = string.Join(", ", req.CtorServices.Select(s => $"{spRef}.GetRequiredService<{s.TypeFullName}>()"));
+                    sb.AppendLine($"{indent}var handler = new {req.HandlerTypeFullName}({ctorArgs});");
+                }
+                break;
+        }
+    }
+
+    private static string BuildInstanceHandlerCall(HandlerInfo h, string msgVar)
+    {
+        var args = msgVar;
+        foreach (var svc in h.MethodServices)
+            args += ", " + svc.ParamName;
+        if (h.HasContextParam)
+            args += ", ctx";
+        if (h.HasCancellationToken)
+            args += ", ct";
+        return "handler." + h.MethodName + "(" + args + ")";
+    }
+
+    private static string BuildStaticHandlerCall(HandlerInfo h, string msgVar)
+    {
+        var args = msgVar;
+        foreach (var svc in h.MethodServices)
+            args += ", " + svc.ParamName;
+        if (h.HasContextParam)
+            args += ", ctx";
+        if (h.HasCancellationToken)
+            args += ", ct";
+        return h.HandlerTypeFullName + "." + h.MethodName + "(" + args + ")";
+    }
+
+    private static void EmitBehaviorPipeline(StringBuilder sb, HandlerInfo req, string handlerCall, string indent, string spRef)
+    {
+        sb.AppendLine($"{indent}var behaviors = {spRef}.GetServices<IPipelineBehavior<{req.MessageTypeFullName}, {req.ResponseTypeFullName}>>();");
         if (req.ReturnsVoidTask)
             sb.AppendLine($"{indent}NextDelegate<{req.ResponseTypeFullName}> pipeline = async () => {{ await {handlerCall}.ConfigureAwait(false); return {UnitFull}.Value; }};");
         else
@@ -472,22 +633,141 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine($"{indent}    var b = behavior;");
         sb.AppendLine($"{indent}    pipeline = () => b.HandleAsync(msg, next, ct);");
         sb.AppendLine($"{indent}}}");
-        sb.AppendLine($"{indent}return (TResponse)(object)await pipeline().ConfigureAwait(false);");
+        sb.AppendLine($"{indent}return await pipeline().ConfigureAwait(false);");
     }
 
-    private static string BuildHandlerCall(HandlerInfo h, string msgVar)
+    private static void EmitNotificationHandlerLambda(StringBuilder sb, HandlerInfo h, string indent)
     {
-        var args = msgVar;
-        if (h.HasContextParam)
-            args += ", ctx";
-        if (h.HasCancellationToken)
-            args += ", ct";
-        return "handler." + h.MethodName + "(" + args + ")";
+        // Each notification handler lambda creates its own handler instance per-call
+        // and resolves its own scope if needed
+        var needsScope = h.Lifetime == HandlerLifetime.Scoped;
+        var isStaticWithScopedServices = h.IsStatic && h.MethodServices.Count > 0 && h.Lifetime == HandlerLifetime.Scoped;
+        if (isStaticWithScopedServices)
+            needsScope = true;
+
+        if (h.IsStatic && h.MethodServices.Count == 0 && !needsScope)
+        {
+            // Simple static call — no handler construction needed
+            var call = BuildNotificationStaticCall(h);
+            sb.AppendLine($"{indent}(n, c) => {call},");
+        }
+        else if (needsScope)
+        {
+            // Need a scope: use async lambda
+            sb.AppendLine($"{indent}async (n, c) => {{");
+            sb.AppendLine($"{indent}    using var scope = _sp.CreateScope();");
+            sb.AppendLine($"{indent}    var sp = scope.ServiceProvider;");
+
+            // Resolve method services
+            foreach (var svc in h.MethodServices)
+            {
+                sb.AppendLine($"{indent}    var {svc.ParamName} = sp.GetRequiredService<{svc.TypeFullName}>();");
+            }
+
+            if (h.IsStatic)
+            {
+                var call = BuildNotificationStaticCallInLambda(h);
+                sb.AppendLine($"{indent}    await {call}.ConfigureAwait(false);");
+            }
+            else
+            {
+                var ctorArgs = BuildCtorArgs(h, "sp");
+                sb.AppendLine($"{indent}    var h = new {h.HandlerTypeFullName}({ctorArgs});");
+                var call = BuildNotificationInstanceCallInLambda(h);
+                sb.AppendLine($"{indent}    await {call}.ConfigureAwait(false);");
+            }
+
+            sb.AppendLine($"{indent}}},");
+        }
+        else
+        {
+            // Transient or singleton instance handler (no scope needed)
+            if (h.Lifetime == HandlerLifetime.Singleton)
+            {
+                var fieldName = "_singleton_" + SanitizeTypeName(h.HandlerTypeFullName);
+                // Resolve method services from root
+                if (h.MethodServices.Count > 0)
+                {
+                    sb.AppendLine($"{indent}async (n, c) => {{");
+                    foreach (var svc in h.MethodServices)
+                    {
+                        sb.AppendLine($"{indent}    var {svc.ParamName} = _sp.GetRequiredService<{svc.TypeFullName}>();");
+                    }
+                    var ctorArgs = BuildCtorArgs(h, "_sp");
+                    sb.AppendLine($"{indent}    var h = {fieldName} ??= new {h.HandlerTypeFullName}({ctorArgs});");
+                    var call = BuildNotificationInstanceCallInLambda(h);
+                    sb.AppendLine($"{indent}    await {call}.ConfigureAwait(false);");
+                    sb.AppendLine($"{indent}}},");
+                }
+                else
+                {
+                    var ctorArgs = BuildCtorArgs(h, "_sp");
+                    sb.AppendLine($"{indent}(n, c) => {{");
+                    sb.AppendLine($"{indent}    var h = {fieldName} ??= new {h.HandlerTypeFullName}({ctorArgs});");
+                    var call = BuildNotificationInstanceCallInLambda(h);
+                    sb.AppendLine($"{indent}    return {call};");
+                    sb.AppendLine($"{indent}}},");
+                }
+            }
+            else
+            {
+                // Transient instance handler
+                if (h.MethodServices.Count > 0)
+                {
+                    sb.AppendLine($"{indent}async (n, c) => {{");
+                    foreach (var svc in h.MethodServices)
+                    {
+                        sb.AppendLine($"{indent}    var {svc.ParamName} = _sp.GetRequiredService<{svc.TypeFullName}>();");
+                    }
+                    var ctorArgs = BuildCtorArgs(h, "_sp");
+                    sb.AppendLine($"{indent}    var h = new {h.HandlerTypeFullName}({ctorArgs});");
+                    var call = BuildNotificationInstanceCallInLambda(h);
+                    sb.AppendLine($"{indent}    await {call}.ConfigureAwait(false);");
+                    sb.AppendLine($"{indent}}},");
+                }
+                else
+                {
+                    var ctorArgs = BuildCtorArgs(h, "_sp");
+                    sb.AppendLine($"{indent}(n, c) => {{ var h = new {h.HandlerTypeFullName}({ctorArgs}); return {BuildNotificationInstanceCallInLambda(h)}; }},");
+                }
+            }
+        }
     }
 
-    private static string BuildNotificationHandlerCall(HandlerInfo h)
+    private static string BuildCtorArgs(HandlerInfo h, string spRef)
+    {
+        if (h.CtorServices.Count == 0)
+            return "";
+        return string.Join(", ", h.CtorServices.Select(s => $"{spRef}.GetRequiredService<{s.TypeFullName}>()"));
+    }
+
+    private static string BuildNotificationStaticCall(HandlerInfo h)
     {
         var args = "n";
+        if (h.HasContextParam)
+            args += ", MessageContextScope.Current!";
+        if (h.HasCancellationToken)
+            args += ", c";
+        return h.HandlerTypeFullName + "." + h.MethodName + "(" + args + ")";
+    }
+
+    private static string BuildNotificationStaticCallInLambda(HandlerInfo h)
+    {
+        var args = "n";
+        foreach (var svc in h.MethodServices)
+            args += ", " + svc.ParamName;
+        if (h.HasContextParam)
+            args += ", MessageContextScope.Current!";
+        if (h.HasCancellationToken)
+            args += ", c";
+        return h.HandlerTypeFullName + "." + h.MethodName + "(" + args + ")";
+    }
+
+    private static string BuildNotificationInstanceCallInLambda(HandlerInfo h)
+    {
+        var args = "n";
+        foreach (var svc in h.MethodServices)
+            args += ", " + svc.ParamName;
         if (h.HasContextParam)
             args += ", MessageContextScope.Current!";
         if (h.HasCancellationToken)
@@ -523,16 +803,11 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("    }");
         sb.AppendLine();
         sb.AppendLine("#pragma warning disable IL2055, IL2072, IL3050");
-        sb.AppendLine("    private static void RegisterHandlers(IServiceCollection services, ServiceLifetime lifetime, IReadOnlyList<Type> behaviorTypes, MomentumOptions options)");
+        sb.AppendLine("    private static void RegisterHandlers(IServiceCollection services, ServiceLifetime lifetime, IReadOnlyList<Type> behaviorTypes)");
         sb.AppendLine("    {");
         sb.AppendLine("        GeneratedMessageBus.HasBehaviors = behaviorTypes.Count > 0;");
         sb.AppendLine();
-        sb.AppendLine("        // Handler registrations (concrete types — fully AOT-safe)");
 
-        foreach (var h in handlers)
-            sb.AppendLine($"        services.TryAdd(new ServiceDescriptor(typeof({h.HandlerTypeFullName}), typeof({h.HandlerTypeFullName}), lifetime));");
-
-        sb.AppendLine();
         sb.AppendLine("        // Pipeline behavior registrations.");
         sb.AppendLine("        // MakeGenericType is AOT-safe here because DynamicDependency attributes");
         sb.AppendLine("        // below ensure the trimmer preserves all closed generic constructions.");
@@ -551,7 +826,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("#pragma warning restore IL2055, IL2072, IL3050");
         sb.AppendLine();
         sb.AppendLine("        services.TryAddSingleton<IMessageBus>(sp =>");
-        sb.AppendLine("            new GeneratedMessageBus(sp, sp.GetRequiredService<INotificationPublishStrategy>(), options));");
+        sb.AppendLine("            new GeneratedMessageBus(sp, sp.GetRequiredService<INotificationPublishStrategy>()));");
         sb.AppendLine("        services.TryAddScoped<IMessageContext>(sp => MessageContextScope.Current ?? throw new InvalidOperationException(");
         sb.AppendLine("            \"IMessageContext is only available during message dispatch. Use IMessageBus for sending outside handlers.\"));");
         sb.AppendLine("    }");
@@ -598,6 +873,14 @@ internal static class Diagnostics
 // Internal models
 // ═════════════════════════════════════════════════════════════════════════
 
+internal enum HandlerLifetime { Scoped, Singleton, Transient }
+
+internal sealed class ServiceParam
+{
+    public string TypeFullName { get; set; } = null!;
+    public string ParamName { get; set; } = null!;
+}
+
 internal sealed class HandlerInfo
 {
     public string HandlerTypeFullName { get; set; } = null!;
@@ -610,6 +893,10 @@ internal sealed class HandlerInfo
     public bool HasContextParam { get; set; }
     public bool HasCancellationToken { get; set; }
     public bool ReturnsVoidTask { get; set; }
+    public bool IsStatic { get; set; }
+    public HandlerLifetime Lifetime { get; set; }
+    public List<ServiceParam> CtorServices { get; set; } = new List<ServiceParam>();
+    public List<ServiceParam> MethodServices { get; set; } = new List<ServiceParam>();
 }
 
 internal sealed class GeneratorConfig

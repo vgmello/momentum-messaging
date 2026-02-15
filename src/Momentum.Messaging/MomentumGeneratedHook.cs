@@ -10,7 +10,7 @@ public static class MomentumGeneratedHook
 {
     /// <summary>
     /// Set by the source-generated ModuleInitializer.
-    /// Parameters: services, handler lifetime, behavior open generic types, options.
+    /// Parameters: services, handler lifetime, behavior open generic types.
     /// </summary>
-    public static Action<IServiceCollection, ServiceLifetime, IReadOnlyList<Type>, MomentumOptions>? RegistrationAction { get; set; }
+    public static Action<IServiceCollection, ServiceLifetime, IReadOnlyList<Type>>? RegistrationAction { get; set; }
 }
