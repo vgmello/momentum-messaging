@@ -49,20 +49,77 @@ public sealed class MessageContextScope : IMessageContext
     public static MessageContextScope? Current => CurrentScope.Value;
 
     private readonly IMessageBus _bus;
+    private readonly MessageContextScope? _parent;
+    private string? _messageId;
+    private string? _correlationId;
+    private bool _correlationIdSet;
+    private string? _causationId;
+    private bool _causationIdSet;
+    private DateTimeOffset? _timestamp;
 
     [EditorBrowsable(EditorBrowsableState.Never)]
-    public MessageContextScope(IMessageBus bus)
+    public MessageContextScope(IMessageBus bus, MessageContextScope? parent = null)
     {
         _bus = bus;
+        _parent = parent;
     }
 
-    public string MessageId { get; set; } = null!;
-    public string? CorrelationId { get; set; }
-    public string? CausationId { get; set; }
+    public string MessageId
+    {
+        get => _messageId ??= Guid.NewGuid().ToString("N");
+        set => _messageId = value;
+    }
+
+    public string? CorrelationId
+    {
+        get
+        {
+            if (!_correlationIdSet)
+            {
+                _correlationId = _parent?.CorrelationId ?? Guid.NewGuid().ToString("N");
+                _correlationIdSet = true;
+            }
+            return _correlationId;
+        }
+        set
+        {
+            _correlationId = value;
+            _correlationIdSet = true;
+        }
+    }
+
+    public string? CausationId
+    {
+        get
+        {
+            if (!_causationIdSet)
+            {
+                _causationId = _parent?.MessageId;
+                _causationIdSet = true;
+            }
+            return _causationId;
+        }
+        set
+        {
+            _causationId = value;
+            _causationIdSet = true;
+        }
+    }
+
     public string? Source { get; set; }
     public string? PartitionKey { get; set; }
     public MessageHeaders Headers { get; set; } = MessageHeaders.Empty;
-    public DateTimeOffset Timestamp { get; set; }
+
+    public DateTimeOffset Timestamp
+    {
+        get
+        {
+            _timestamp ??= DateTimeOffset.UtcNow;
+            return _timestamp.Value;
+        }
+        set => _timestamp = value;
+    }
+
     public MessageEnvelope? Envelope { get; set; }
 
     public Task<TResponse> SendAsync<TResponse>(IRequest<TResponse> request, CancellationToken ct = default)

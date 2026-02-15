@@ -311,32 +311,22 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("{");
         sb.AppendLine("    private readonly IServiceProvider _sp;");
         sb.AppendLine("    private readonly INotificationPublishStrategy _publishStrategy;");
+        sb.AppendLine("    private readonly bool _scopedDispatch;");
+        sb.AppendLine("    internal static bool HasBehaviors;");
         sb.AppendLine();
-        sb.AppendLine("    public GeneratedMessageBus(IServiceProvider sp, INotificationPublishStrategy publishStrategy)");
+        sb.AppendLine("    public GeneratedMessageBus(IServiceProvider sp, INotificationPublishStrategy publishStrategy, MomentumOptions options)");
         sb.AppendLine("    {");
         sb.AppendLine("        _sp = sp;");
         sb.AppendLine("        _publishStrategy = publishStrategy;");
-        sb.AppendLine("    }");
-        sb.AppendLine();
-        sb.AppendLine("    private static MessageContextScope CreateScope(IMessageBus bus)");
-        sb.AppendLine("    {");
-        sb.AppendLine("        var parent = MessageContextScope.Current;");
-        sb.AppendLine("        var scope = new MessageContextScope(bus);");
-        sb.AppendLine("        scope.MessageId = System.Guid.NewGuid().ToString(\"N\");");
-        sb.AppendLine("        scope.CorrelationId = parent?.CorrelationId ?? System.Guid.NewGuid().ToString(\"N\");");
-        sb.AppendLine("        scope.CausationId = parent?.MessageId;");
-        sb.AppendLine("        scope.Timestamp = System.DateTimeOffset.UtcNow;");
-        sb.AppendLine("        return scope;");
+        sb.AppendLine("        _scopedDispatch = options.ScopedDispatch;");
         sb.AppendLine("    }");
         sb.AppendLine();
 
-        // SendAsync
+        // ── SendAsync ──
         sb.AppendLine("    public async Task<TResponse> SendAsync<TResponse>(IRequest<TResponse> request, CancellationToken ct = default)");
         sb.AppendLine("    {");
-        sb.AppendLine("        using var diScope = _sp.CreateScope();");
-        sb.AppendLine("        var scopedSp = diScope.ServiceProvider;");
-        sb.AppendLine("        var ctx = CreateScope(this);");
-        sb.AppendLine("        var previous = MessageContextScope.SetCurrent(ctx);");
+        sb.AppendLine("        var diScope = _scopedDispatch ? _sp.CreateScope() : null;");
+        sb.AppendLine("        var sp = diScope?.ServiceProvider ?? _sp;");
         sb.AppendLine("        try");
         sb.AppendLine("        {");
         sb.AppendLine("            switch (request)");
@@ -344,22 +334,64 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
 
         foreach (var req in requests)
         {
-            var handlerCall = BuildHandlerCall(req, "msg");
             sb.AppendLine($"                case {req.MessageTypeFullName} msg:");
             sb.AppendLine("                {");
-            sb.AppendLine($"                    var handler = scopedSp.GetRequiredService<{req.HandlerTypeFullName}>();");
-            sb.AppendLine($"                    var behaviors = scopedSp.GetServices<IPipelineBehavior<{req.MessageTypeFullName}, {req.ResponseTypeFullName}>>();");
-            if (req.ReturnsVoidTask)
-                sb.AppendLine($"                    NextDelegate<{req.ResponseTypeFullName}> pipeline = async () => {{ await {handlerCall}.ConfigureAwait(false); return {UnitFull}.Value; }};");
+
+            if (req.HasContextParam)
+            {
+                // Context-using handler: create scope + try/finally inside case
+                sb.AppendLine("                    var ctx = new MessageContextScope(this, MessageContextScope.Current);");
+                sb.AppendLine("                    var previous = MessageContextScope.SetCurrent(ctx);");
+                sb.AppendLine("                    try");
+                sb.AppendLine("                    {");
+
+                var handlerCall = BuildHandlerCall(req, "msg");
+                sb.AppendLine($"                        var handler = sp.GetRequiredService<{req.HandlerTypeFullName}>();");
+
+                // Fast path: no behaviors
+                sb.AppendLine("                        if (!HasBehaviors)");
+                if (req.ReturnsVoidTask)
+                {
+                    sb.AppendLine("                        {");
+                    sb.AppendLine($"                            await {handlerCall}.ConfigureAwait(false);");
+                    sb.AppendLine($"                            return (TResponse)(object){UnitFull}.Value;");
+                    sb.AppendLine("                        }");
+                }
+                else
+                {
+                    sb.AppendLine($"                            return (TResponse)(object)await {handlerCall}.ConfigureAwait(false);");
+                }
+
+                // Behavior pipeline
+                EmitBehaviorPipeline(sb, req, handlerCall, "                        ");
+
+                sb.AppendLine("                    }");
+                sb.AppendLine("                    finally { MessageContextScope.RestoreCurrent(previous); }");
+            }
             else
-                sb.AppendLine($"                    NextDelegate<{req.ResponseTypeFullName}> pipeline = () => {handlerCall};");
-            sb.AppendLine("                    foreach (var behavior in behaviors.Reverse())");
-            sb.AppendLine("                    {");
-            sb.AppendLine("                        var next = pipeline;");
-            sb.AppendLine("                        var b = behavior;");
-            sb.AppendLine("                        pipeline = () => b.HandleAsync(msg, next, ct);");
-            sb.AppendLine("                    }");
-            sb.AppendLine("                    return (TResponse)(object)await pipeline().ConfigureAwait(false);");
+            {
+                // No context needed: direct handler call
+                var handlerCall = BuildHandlerCall(req, "msg");
+                sb.AppendLine($"                    var handler = sp.GetRequiredService<{req.HandlerTypeFullName}>();");
+
+                // Fast path: no behaviors
+                sb.AppendLine("                    if (!HasBehaviors)");
+                if (req.ReturnsVoidTask)
+                {
+                    sb.AppendLine("                    {");
+                    sb.AppendLine($"                        await {handlerCall}.ConfigureAwait(false);");
+                    sb.AppendLine($"                        return (TResponse)(object){UnitFull}.Value;");
+                    sb.AppendLine("                    }");
+                }
+                else
+                {
+                    sb.AppendLine($"                        return (TResponse)(object)await {handlerCall}.ConfigureAwait(false);");
+                }
+
+                // Behavior pipeline
+                EmitBehaviorPipeline(sb, req, handlerCall, "                    ");
+            }
+
             sb.AppendLine("                }");
         }
 
@@ -368,52 +400,79 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("                        $\"No handler found for {request.GetType().Name}. Ensure a handler follows Momentum conventions.\");");
         sb.AppendLine("            }");
         sb.AppendLine("        }");
-        sb.AppendLine("        finally");
-        sb.AppendLine("        {");
-        sb.AppendLine("            MessageContextScope.RestoreCurrent(previous);");
-        sb.AppendLine("        }");
+        sb.AppendLine("        finally { diScope?.Dispose(); }");
         sb.AppendLine("    }");
         sb.AppendLine();
 
-        // PublishAsync
+        // ── PublishAsync ──
         sb.AppendLine("    public async Task PublishAsync<TNotification>(TNotification notification, CancellationToken ct = default)");
         sb.AppendLine("        where TNotification : INotification");
         sb.AppendLine("    {");
-        sb.AppendLine("        using var diScope = _sp.CreateScope();");
-        sb.AppendLine("        var scopedSp = diScope.ServiceProvider;");
-        sb.AppendLine("        var ctx = CreateScope(this);");
-        sb.AppendLine("        var previous = MessageContextScope.SetCurrent(ctx);");
+        sb.AppendLine("        var diScope = _scopedDispatch ? _sp.CreateScope() : null;");
+        sb.AppendLine("        var sp = diScope?.ServiceProvider ?? _sp;");
         sb.AppendLine("        try");
         sb.AppendLine("        {");
 
         foreach (var group in notificationGroups)
         {
+            var anyNeedsContext = group.Any(h => h.HasContextParam);
+
             sb.AppendLine($"            if (notification is {group.Key} typedNotification)");
             sb.AppendLine("            {");
-            sb.AppendLine($"                var handlers = new Func<{group.Key}, CancellationToken, Task>[]");
-            sb.AppendLine("                {");
+
+            if (anyNeedsContext)
+            {
+                sb.AppendLine("                var ctx = new MessageContextScope(this, MessageContextScope.Current);");
+                sb.AppendLine("                var previous = MessageContextScope.SetCurrent(ctx);");
+                sb.AppendLine("                try");
+                sb.AppendLine("                {");
+            }
+
+            var indent = anyNeedsContext ? "                    " : "                ";
+            sb.AppendLine($"{indent}var handlers = new Func<{group.Key}, CancellationToken, Task>[]");
+            sb.AppendLine($"{indent}{{");
             foreach (var h in group)
             {
                 var notifCall = BuildNotificationHandlerCall(h);
-                sb.AppendLine($"                    (n, c) => {{ var h = scopedSp.GetRequiredService<{h.HandlerTypeFullName}>(); return {notifCall}; }},");
+                sb.AppendLine($"{indent}    (n, c) => {{ var h = sp.GetRequiredService<{h.HandlerTypeFullName}>(); return {notifCall}; }},");
             }
-            sb.AppendLine("                };");
-            sb.AppendLine("                await _publishStrategy.PublishAsync(");
-            sb.AppendLine("                    (IReadOnlyList<Func<TNotification, CancellationToken, Task>>)(object)handlers,");
-            sb.AppendLine("                    notification, ct).ConfigureAwait(false);");
+            sb.AppendLine($"{indent}}};");
+            sb.AppendLine($"{indent}await _publishStrategy.PublishAsync(");
+            sb.AppendLine($"{indent}    (IReadOnlyList<Func<TNotification, CancellationToken, Task>>)(object)handlers,");
+            sb.AppendLine($"{indent}    notification, ct).ConfigureAwait(false);");
+
+            if (anyNeedsContext)
+            {
+                sb.AppendLine("                }");
+                sb.AppendLine("                finally { MessageContextScope.RestoreCurrent(previous); }");
+            }
+
             sb.AppendLine("                return;");
             sb.AppendLine("            }");
         }
 
         sb.AppendLine("        }");
-        sb.AppendLine("        finally");
-        sb.AppendLine("        {");
-        sb.AppendLine("            MessageContextScope.RestoreCurrent(previous);");
-        sb.AppendLine("        }");
+        sb.AppendLine("        finally { diScope?.Dispose(); }");
         sb.AppendLine("    }");
         sb.AppendLine("}");
 
         return sb.ToString();
+    }
+
+    private static void EmitBehaviorPipeline(StringBuilder sb, HandlerInfo req, string handlerCall, string indent)
+    {
+        sb.AppendLine($"{indent}var behaviors = sp.GetServices<IPipelineBehavior<{req.MessageTypeFullName}, {req.ResponseTypeFullName}>>();");
+        if (req.ReturnsVoidTask)
+            sb.AppendLine($"{indent}NextDelegate<{req.ResponseTypeFullName}> pipeline = async () => {{ await {handlerCall}.ConfigureAwait(false); return {UnitFull}.Value; }};");
+        else
+            sb.AppendLine($"{indent}NextDelegate<{req.ResponseTypeFullName}> pipeline = () => {handlerCall};");
+        sb.AppendLine($"{indent}foreach (var behavior in behaviors.Reverse())");
+        sb.AppendLine($"{indent}{{");
+        sb.AppendLine($"{indent}    var next = pipeline;");
+        sb.AppendLine($"{indent}    var b = behavior;");
+        sb.AppendLine($"{indent}    pipeline = () => b.HandleAsync(msg, next, ct);");
+        sb.AppendLine($"{indent}}}");
+        sb.AppendLine($"{indent}return (TResponse)(object)await pipeline().ConfigureAwait(false);");
     }
 
     private static string BuildHandlerCall(HandlerInfo h, string msgVar)
@@ -464,8 +523,10 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("    }");
         sb.AppendLine();
         sb.AppendLine("#pragma warning disable IL2055, IL2072, IL3050");
-        sb.AppendLine("    private static void RegisterHandlers(IServiceCollection services, ServiceLifetime lifetime, IReadOnlyList<Type> behaviorTypes)");
+        sb.AppendLine("    private static void RegisterHandlers(IServiceCollection services, ServiceLifetime lifetime, IReadOnlyList<Type> behaviorTypes, MomentumOptions options)");
         sb.AppendLine("    {");
+        sb.AppendLine("        GeneratedMessageBus.HasBehaviors = behaviorTypes.Count > 0;");
+        sb.AppendLine();
         sb.AppendLine("        // Handler registrations (concrete types — fully AOT-safe)");
 
         foreach (var h in handlers)
@@ -489,7 +550,8 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("        }");
         sb.AppendLine("#pragma warning restore IL2055, IL2072, IL3050");
         sb.AppendLine();
-        sb.AppendLine("        services.TryAddSingleton<IMessageBus, GeneratedMessageBus>();");
+        sb.AppendLine("        services.TryAddSingleton<IMessageBus>(sp =>");
+        sb.AppendLine("            new GeneratedMessageBus(sp, sp.GetRequiredService<INotificationPublishStrategy>(), options));");
         sb.AppendLine("        services.TryAddScoped<IMessageContext>(sp => MessageContextScope.Current ?? throw new InvalidOperationException(");
         sb.AppendLine("            \"IMessageContext is only available during message dispatch. Use IMessageBus for sending outside handlers.\"));");
         sb.AppendLine("    }");
