@@ -39,7 +39,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
                 predicate: static (node, _) => node is ClassDeclarationSyntax,
                 transform: static (ctx, ct) =>
                     ctx.SemanticModel.GetDeclaredSymbol((ClassDeclarationSyntax)ctx.Node, ct))
-            .Where(static s => s is not null && !s.IsAbstract)
+            .Where(static s => s is not null && (!s.IsAbstract || s.IsStatic))
             .Select(static (s, _) => (INamedTypeSymbol)s!)
             .Collect();
 
@@ -809,8 +809,6 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine();
 
         sb.AppendLine("        // Pipeline behavior registrations.");
-        sb.AppendLine("        // MakeGenericType is AOT-safe here because DynamicDependency attributes");
-        sb.AppendLine("        // below ensure the trimmer preserves all closed generic constructions.");
         sb.AppendLine("        for (var i = 0; i < behaviorTypes.Count; i++)");
         sb.AppendLine("        {");
 

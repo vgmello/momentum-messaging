@@ -21,7 +21,7 @@ public sealed class MomentumBuilder
 {
     private readonly IServiceCollection _services;
     private readonly List<Type> _behaviorTypes = [];
-    private ServiceLifetime _handlerLifetime = ServiceLifetime.Transient;
+    private ServiceLifetime _behaviorLifetime = ServiceLifetime.Transient;
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)]
     private Type _publishStrategyType = typeof(SequentialStrategy);
 
@@ -64,9 +64,13 @@ public sealed class MomentumBuilder
 
     // -- Lifetime --
 
-    public MomentumBuilder WithHandlerLifetime(ServiceLifetime lifetime)
+    /// <summary>
+    /// Sets the DI lifetime for pipeline behavior registrations.
+    /// Handler lifetime is controlled per-handler via [ScopedHandler], [SingletonHandler], or [TransientHandler] attributes.
+    /// </summary>
+    public MomentumBuilder WithBehaviorLifetime(ServiceLifetime lifetime)
     {
-        _handlerLifetime = lifetime;
+        _behaviorLifetime = lifetime;
         return this;
     }
 
@@ -84,6 +88,6 @@ public sealed class MomentumBuilder
         // The generated code registers the message bus AND closed generic
         // behavior registrations (AOT-safe). We pass the open generic types
         // so the generated code can emit closed versions for each request type.
-        MomentumGeneratedHook.RegistrationAction(_services, _handlerLifetime, _behaviorTypes);
+        MomentumGeneratedHook.RegistrationAction(_services, _behaviorLifetime, _behaviorTypes);
     }
 }
