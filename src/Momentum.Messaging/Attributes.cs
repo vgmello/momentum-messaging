@@ -83,6 +83,8 @@ public sealed class ScopedHandlerAttribute : Attribute;
 /// <summary>
 /// Handler instance is cached as a singleton. Constructor services are resolved once.
 /// Method-injected services are resolved from the root provider per call.
+/// Scoped services (e.g., DbContext) injected via method parameters will fail at runtime
+/// because they cannot be resolved from the root provider without a scope.
 /// </summary>
 [AttributeUsage(AttributeTargets.Class)]
 public sealed class SingletonHandlerAttribute : Attribute;

@@ -391,7 +391,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("{");
         sb.AppendLine("    private readonly IServiceProvider _sp;");
         sb.AppendLine("    private readonly INotificationPublishStrategy _publishStrategy;");
-        sb.AppendLine("    internal static volatile bool HasBehaviors;");
+        sb.AppendLine("    private readonly bool _hasBehaviors;");
 
         // Emit singleton handler fields
         foreach (var group in singletonHandlers)
@@ -401,30 +401,31 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         }
 
         sb.AppendLine();
-        sb.AppendLine("    public GeneratedMessageBus(IServiceProvider sp, INotificationPublishStrategy publishStrategy)");
+        sb.AppendLine("    public GeneratedMessageBus(IServiceProvider sp, INotificationPublishStrategy publishStrategy, bool hasBehaviors)");
         sb.AppendLine("    {");
         sb.AppendLine("        _sp = sp;");
         sb.AppendLine("        _publishStrategy = publishStrategy;");
+        sb.AppendLine("        _hasBehaviors = hasBehaviors;");
         sb.AppendLine("    }");
         sb.AppendLine();
 
         // ── Async helper methods for cleanup on truly-async paths ──
-        sb.AppendLine("    private static async Task<T> AwaitHandler<T>(Task<T> task, IServiceScope? scope, MessageContextScope? previousCtx)");
+        sb.AppendLine("    private static async Task<T> AwaitHandler<T>(Task<T> task, IServiceScope? scope, MessageContextScope? previousCtx, bool restoreCtx)");
         sb.AppendLine("    {");
         sb.AppendLine("        try { return await task.ConfigureAwait(false); }");
         sb.AppendLine("        finally");
         sb.AppendLine("        {");
-        sb.AppendLine("            if (previousCtx != null) MessageContextScope.RestoreCurrent(previousCtx);");
+        sb.AppendLine("            if (restoreCtx) MessageContextScope.RestoreCurrent(previousCtx);");
         sb.AppendLine("            scope?.Dispose();");
         sb.AppendLine("        }");
         sb.AppendLine("    }");
         sb.AppendLine();
-        sb.AppendLine("    private static async Task<Momentum.Messaging.Unit> AwaitVoidHandler(Task task, IServiceScope? scope, MessageContextScope? previousCtx)");
+        sb.AppendLine("    private static async Task<Momentum.Messaging.Unit> AwaitVoidHandler(Task task, IServiceScope? scope, MessageContextScope? previousCtx, bool restoreCtx)");
         sb.AppendLine("    {");
         sb.AppendLine("        try { await task.ConfigureAwait(false); return Momentum.Messaging.Unit.Value; }");
         sb.AppendLine("        finally");
         sb.AppendLine("        {");
-        sb.AppendLine("            if (previousCtx != null) MessageContextScope.RestoreCurrent(previousCtx);");
+        sb.AppendLine("            if (restoreCtx) MessageContextScope.RestoreCurrent(previousCtx);");
         sb.AppendLine("            scope?.Dispose();");
         sb.AppendLine("        }");
         sb.AppendLine("    }");
@@ -516,6 +517,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
     /// Emits a non-async typed dispatch method with synchronous fast path.
     /// For sync-completing handlers (common case), avoids async state machine allocation entirely.
     /// Falls back to async helper only when the handler task is not yet complete.
+    /// Wraps in try/catch when cleanup is needed (scope disposal, context restoration).
     /// </summary>
     private static void EmitTypedDispatchMethod(StringBuilder sb, HandlerInfo req, string dispatchName)
     {
@@ -528,30 +530,39 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         if (staticWithScopedServices)
             needsScope = true;
 
+        var needsCleanup = needsScope || req.HasContextParam;
         var indent = "        ";
+        var bodyIndent = needsCleanup ? "            " : "        ";
         var spRef = needsScope ? "sp" : "_sp";
+        var restoreCtxArg = req.HasContextParam ? "true" : "false";
 
-        // Scope (not using 'using' — we manage disposal manually for sync fast path)
+        // Resource acquisition (safe operations — before try)
         if (needsScope)
         {
             sb.AppendLine($"{indent}var scope = _sp.CreateScope();");
             sb.AppendLine($"{indent}var sp = scope.ServiceProvider;");
         }
 
-        // Context setup
         if (req.HasContextParam)
         {
             sb.AppendLine($"{indent}var ctx = new MessageContextScope(this, MessageContextScope.Current);");
             sb.AppendLine($"{indent}var previous = MessageContextScope.SetCurrent(ctx);");
         }
 
-        // Resolve method services
-        foreach (var svc in req.MethodServices)
+        // try block wraps everything that can throw (service resolution, handler construction, invocation)
+        if (needsCleanup)
         {
-            sb.AppendLine($"{indent}var {svc.ParamName} = {spRef}.GetRequiredService<{svc.TypeFullName}>();");
+            sb.AppendLine($"{indent}try");
+            sb.AppendLine($"{indent}{{");
         }
 
-        // Build handler + call expression
+        // Resolve method services (can throw)
+        foreach (var svc in req.MethodServices)
+        {
+            sb.AppendLine($"{bodyIndent}var {svc.ParamName} = {spRef}.GetRequiredService<{svc.TypeFullName}>();");
+        }
+
+        // Build handler + call expression (construction can throw)
         string handlerCallExpr;
         if (req.IsStatic)
         {
@@ -559,40 +570,54 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         }
         else
         {
-            EmitHandlerConstruction(sb, req, indent, spRef);
+            EmitHandlerConstruction(sb, req, bodyIndent, spRef);
             handlerCallExpr = BuildInstanceHandlerCall(req, "msg");
         }
 
-        // If behaviors are possible, check HasBehaviors and delegate to async pipeline
-        sb.AppendLine($"{indent}if (HasBehaviors)");
-        sb.AppendLine($"{indent}    return {dispatchName}_WithBehaviors(msg, {(needsScope ? "scope" : "null")}, {(req.HasContextParam ? "previous" : "null")}, ct);");
+        // If behaviors are registered, delegate to async pipeline (owns cleanup via its own try/finally)
+        sb.AppendLine($"{bodyIndent}if (_hasBehaviors)");
+        sb.AppendLine($"{bodyIndent}    return {dispatchName}_WithBehaviors(msg, {(needsScope ? "scope" : "null")}, {(req.HasContextParam ? "previous" : "null")}, ct);");
 
         // Fast path: no behaviors — get the task and try sync completion
         if (req.ReturnsVoidTask)
         {
-            sb.AppendLine($"{indent}var __handlerTask = {handlerCallExpr};");
-            sb.AppendLine($"{indent}if (__handlerTask.IsCompletedSuccessfully)");
-            sb.AppendLine($"{indent}{{");
+            sb.AppendLine($"{bodyIndent}var __handlerTask = {handlerCallExpr};");
+            sb.AppendLine($"{bodyIndent}if (__handlerTask.IsCompletedSuccessfully)");
+            sb.AppendLine($"{bodyIndent}{{");
             if (req.HasContextParam)
-                sb.AppendLine($"{indent}    MessageContextScope.RestoreCurrent(previous);");
+                sb.AppendLine($"{bodyIndent}    MessageContextScope.RestoreCurrent(previous);");
             if (needsScope)
-                sb.AppendLine($"{indent}    scope.Dispose();");
-            sb.AppendLine($"{indent}    return Task.FromResult({UnitFull}.Value);");
-            sb.AppendLine($"{indent}}}");
-            sb.AppendLine($"{indent}return AwaitVoidHandler(__handlerTask, {(needsScope ? "scope" : "null")}, {(req.HasContextParam ? "previous" : "null")});");
+                sb.AppendLine($"{bodyIndent}    scope.Dispose();");
+            sb.AppendLine($"{bodyIndent}    return Task.FromResult({UnitFull}.Value);");
+            sb.AppendLine($"{bodyIndent}}}");
+            sb.AppendLine($"{bodyIndent}return AwaitVoidHandler(__handlerTask, {(needsScope ? "scope" : "null")}, {(req.HasContextParam ? "previous" : "null")}, {restoreCtxArg});");
         }
         else
         {
-            sb.AppendLine($"{indent}var __handlerTask = {handlerCallExpr};");
-            sb.AppendLine($"{indent}if (__handlerTask.IsCompletedSuccessfully)");
+            sb.AppendLine($"{bodyIndent}var __handlerTask = {handlerCallExpr};");
+            sb.AppendLine($"{bodyIndent}if (__handlerTask.IsCompletedSuccessfully)");
+            sb.AppendLine($"{bodyIndent}{{");
+            if (req.HasContextParam)
+                sb.AppendLine($"{bodyIndent}    MessageContextScope.RestoreCurrent(previous);");
+            if (needsScope)
+                sb.AppendLine($"{bodyIndent}    scope.Dispose();");
+            sb.AppendLine($"{bodyIndent}    return __handlerTask;");
+            sb.AppendLine($"{bodyIndent}}}");
+            sb.AppendLine($"{bodyIndent}return AwaitHandler(__handlerTask, {(needsScope ? "scope" : "null")}, {(req.HasContextParam ? "previous" : "null")}, {restoreCtxArg});");
+        }
+
+        // Catch block — clean up on synchronous exceptions (service resolution, handler ctor, etc.)
+        if (needsCleanup)
+        {
+            sb.AppendLine($"{indent}}}");
+            sb.AppendLine($"{indent}catch");
             sb.AppendLine($"{indent}{{");
             if (req.HasContextParam)
                 sb.AppendLine($"{indent}    MessageContextScope.RestoreCurrent(previous);");
             if (needsScope)
                 sb.AppendLine($"{indent}    scope.Dispose();");
-            sb.AppendLine($"{indent}    return __handlerTask;");
+            sb.AppendLine($"{indent}    throw;");
             sb.AppendLine($"{indent}}}");
-            sb.AppendLine($"{indent}return AwaitHandler(__handlerTask, {(needsScope ? "scope" : "null")}, {(req.HasContextParam ? "previous" : "null")});");
         }
 
         sb.AppendLine("    }");
@@ -732,7 +757,8 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine($"{indent}}}");
         sb.AppendLine($"{indent}finally");
         sb.AppendLine($"{indent}{{");
-        sb.AppendLine($"{indent}    if (previousCtx != null) MessageContextScope.RestoreCurrent(previousCtx);");
+        if (req.HasContextParam)
+            sb.AppendLine($"{indent}    MessageContextScope.RestoreCurrent(previousCtx);");
         sb.AppendLine($"{indent}    scope?.Dispose();");
         sb.AppendLine($"{indent}}}");
 
@@ -909,7 +935,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("#pragma warning disable IL2055, IL2072, IL3050");
         sb.AppendLine("    private static void RegisterHandlers(IServiceCollection services, ServiceLifetime lifetime, IReadOnlyList<Type> behaviorTypes)");
         sb.AppendLine("    {");
-        sb.AppendLine("        GeneratedMessageBus.HasBehaviors = behaviorTypes.Count > 0;");
+        sb.AppendLine("        var hasBehaviors = behaviorTypes.Count > 0;");
         sb.AppendLine();
 
         sb.AppendLine("        // Pipeline behavior registrations.");
@@ -928,7 +954,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("#pragma warning restore IL2055, IL2072, IL3050");
         sb.AppendLine();
         sb.AppendLine("        services.TryAddSingleton<IMessageBus>(sp =>");
-        sb.AppendLine("            new GeneratedMessageBus(sp, sp.GetRequiredService<INotificationPublishStrategy>()));");
+        sb.AppendLine("            new GeneratedMessageBus(sp, sp.GetRequiredService<INotificationPublishStrategy>(), hasBehaviors));");
         sb.AppendLine("        services.TryAddScoped<IMessageContext>(sp => MessageContextScope.Current ?? throw new InvalidOperationException(");
         sb.AppendLine("            \"IMessageContext is only available during message dispatch. Use IMessageBus for sending outside handlers.\"));");
         sb.AppendLine("    }");
