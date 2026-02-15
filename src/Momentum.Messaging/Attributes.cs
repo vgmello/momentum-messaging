@@ -72,3 +72,24 @@ public sealed class MomentumDiscoveryStrategyAttribute : Attribute
     public Type StrategyType { get; }
     public MomentumDiscoveryStrategyAttribute(Type strategyType) => StrategyType = strategyType;
 }
+
+/// <summary>
+/// Handler creates a DI scope per dispatch. This is the default lifetime.
+/// Services injected via constructor or method parameters are resolved from the scope.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class ScopedHandlerAttribute : Attribute;
+
+/// <summary>
+/// Handler instance is cached as a singleton. Constructor services are resolved once.
+/// Method-injected services are resolved from the root provider per call.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class SingletonHandlerAttribute : Attribute;
+
+/// <summary>
+/// Handler is constructed per dispatch without creating a DI scope.
+/// Services are resolved from the root provider.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class TransientHandlerAttribute : Attribute;
