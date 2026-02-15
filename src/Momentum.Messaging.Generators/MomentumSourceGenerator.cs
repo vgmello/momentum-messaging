@@ -408,6 +408,28 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("    }");
         sb.AppendLine();
 
+        // ── Async helper methods for cleanup on truly-async paths ──
+        sb.AppendLine("    private static async Task<T> AwaitHandler<T>(Task<T> task, IServiceScope? scope, MessageContextScope? previousCtx)");
+        sb.AppendLine("    {");
+        sb.AppendLine("        try { return await task.ConfigureAwait(false); }");
+        sb.AppendLine("        finally");
+        sb.AppendLine("        {");
+        sb.AppendLine("            if (previousCtx != null) MessageContextScope.RestoreCurrent(previousCtx);");
+        sb.AppendLine("            scope?.Dispose();");
+        sb.AppendLine("        }");
+        sb.AppendLine("    }");
+        sb.AppendLine();
+        sb.AppendLine("    private static async Task<Momentum.Messaging.Unit> AwaitVoidHandler(Task task, IServiceScope? scope, MessageContextScope? previousCtx)");
+        sb.AppendLine("    {");
+        sb.AppendLine("        try { await task.ConfigureAwait(false); return Momentum.Messaging.Unit.Value; }");
+        sb.AppendLine("        finally");
+        sb.AppendLine("        {");
+        sb.AppendLine("            if (previousCtx != null) MessageContextScope.RestoreCurrent(previousCtx);");
+        sb.AppendLine("            scope?.Dispose();");
+        sb.AppendLine("        }");
+        sb.AppendLine("    }");
+        sb.AppendLine();
+
         // ── Emit private typed dispatch methods for each request handler ──
         foreach (var req in requests)
         {
@@ -415,7 +437,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
             EmitTypedDispatchMethod(sb, req, dispatchName);
         }
 
-        // ── SendAsync ── (non-async, returns Task<TResponse> via Unsafe.As)
+        // ── SendAsync ── (non-async, returns Task<TResponse> via Unsafe.As on Task)
         sb.AppendLine("    public Task<TResponse> SendAsync<TResponse>(IRequest<TResponse> request, CancellationToken ct = default)");
         sb.AppendLine("    {");
         sb.AppendLine("        switch (request)");
@@ -490,23 +512,29 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Emits a non-async typed dispatch method with synchronous fast path.
+    /// For sync-completing handlers (common case), avoids async state machine allocation entirely.
+    /// Falls back to async helper only when the handler task is not yet complete.
+    /// </summary>
     private static void EmitTypedDispatchMethod(StringBuilder sb, HandlerInfo req, string dispatchName)
     {
-        sb.AppendLine($"    private async Task<{req.ResponseTypeFullName}> {dispatchName}({req.MessageTypeFullName} msg, CancellationToken ct)");
+        // Non-async signature — returns Task directly when possible
+        sb.AppendLine($"    private Task<{req.ResponseTypeFullName}> {dispatchName}({req.MessageTypeFullName} msg, CancellationToken ct)");
         sb.AppendLine("    {");
 
-        // Determine if we need a scope
         var needsScope = req.Lifetime == HandlerLifetime.Scoped;
-        // Static handlers with method services that are scoped might also need scope
         var staticWithScopedServices = req.IsStatic && req.MethodServices.Count > 0 && req.Lifetime == HandlerLifetime.Scoped;
         if (staticWithScopedServices)
             needsScope = true;
 
         var indent = "        ";
+        var spRef = needsScope ? "sp" : "_sp";
 
+        // Scope (not using 'using' — we manage disposal manually for sync fast path)
         if (needsScope)
         {
-            sb.AppendLine($"{indent}using var scope = _sp.CreateScope();");
+            sb.AppendLine($"{indent}var scope = _sp.CreateScope();");
             sb.AppendLine($"{indent}var sp = scope.ServiceProvider;");
         }
 
@@ -515,58 +543,63 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         {
             sb.AppendLine($"{indent}var ctx = new MessageContextScope(this, MessageContextScope.Current);");
             sb.AppendLine($"{indent}var previous = MessageContextScope.SetCurrent(ctx);");
-            sb.AppendLine($"{indent}try");
-            sb.AppendLine($"{indent}{{");
-            indent = "            ";
         }
 
         // Resolve method services
-        var spRef = needsScope ? "sp" : "_sp";
         foreach (var svc in req.MethodServices)
         {
             sb.AppendLine($"{indent}var {svc.ParamName} = {spRef}.GetRequiredService<{svc.TypeFullName}>();");
         }
 
-        // Build handler + call
+        // Build handler + call expression
         string handlerCallExpr;
         if (req.IsStatic)
         {
-            // Static handler: call directly
             handlerCallExpr = BuildStaticHandlerCall(req, "msg");
         }
         else
         {
-            // Instance handler: construct manually
             EmitHandlerConstruction(sb, req, indent, spRef);
             handlerCallExpr = BuildInstanceHandlerCall(req, "msg");
         }
 
-        // Fast path: no behaviors
-        sb.AppendLine($"{indent}if (!HasBehaviors)");
+        // If behaviors are possible, check HasBehaviors and delegate to async pipeline
+        sb.AppendLine($"{indent}if (HasBehaviors)");
+        sb.AppendLine($"{indent}    return {dispatchName}_WithBehaviors(msg, {(needsScope ? "scope" : "null")}, {(req.HasContextParam ? "previous" : "null")}, ct);");
+
+        // Fast path: no behaviors — get the task and try sync completion
         if (req.ReturnsVoidTask)
         {
+            sb.AppendLine($"{indent}var __handlerTask = {handlerCallExpr};");
+            sb.AppendLine($"{indent}if (__handlerTask.IsCompletedSuccessfully)");
             sb.AppendLine($"{indent}{{");
-            sb.AppendLine($"{indent}    await {handlerCallExpr}.ConfigureAwait(false);");
-            sb.AppendLine($"{indent}    return {UnitFull}.Value;");
+            if (req.HasContextParam)
+                sb.AppendLine($"{indent}    MessageContextScope.RestoreCurrent(previous);");
+            if (needsScope)
+                sb.AppendLine($"{indent}    scope.Dispose();");
+            sb.AppendLine($"{indent}    return Task.FromResult({UnitFull}.Value);");
             sb.AppendLine($"{indent}}}");
+            sb.AppendLine($"{indent}return AwaitVoidHandler(__handlerTask, {(needsScope ? "scope" : "null")}, {(req.HasContextParam ? "previous" : "null")});");
         }
         else
         {
-            sb.AppendLine($"{indent}    return await {handlerCallExpr}.ConfigureAwait(false);");
-        }
-
-        // Behavior pipeline
-        EmitBehaviorPipeline(sb, req, handlerCallExpr, indent, spRef);
-
-        // Close context try/finally
-        if (req.HasContextParam)
-        {
-            sb.AppendLine("        }");
-            sb.AppendLine("        finally { MessageContextScope.RestoreCurrent(previous); }");
+            sb.AppendLine($"{indent}var __handlerTask = {handlerCallExpr};");
+            sb.AppendLine($"{indent}if (__handlerTask.IsCompletedSuccessfully)");
+            sb.AppendLine($"{indent}{{");
+            if (req.HasContextParam)
+                sb.AppendLine($"{indent}    MessageContextScope.RestoreCurrent(previous);");
+            if (needsScope)
+                sb.AppendLine($"{indent}    scope.Dispose();");
+            sb.AppendLine($"{indent}    return __handlerTask;");
+            sb.AppendLine($"{indent}}}");
+            sb.AppendLine($"{indent}return AwaitHandler(__handlerTask, {(needsScope ? "scope" : "null")}, {(req.HasContextParam ? "previous" : "null")});");
         }
 
         sb.AppendLine("    }");
         sb.AppendLine();
+
+        // Emit the async behavior pipeline fallback method
+        EmitBehaviorFallbackMethod(sb, req, dispatchName);
     }
 
     private static void EmitHandlerConstruction(StringBuilder sb, HandlerInfo req, string indent, string spRef)
@@ -640,20 +673,71 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         return h.HandlerTypeFullName + "." + h.MethodName + "(" + args + ")";
     }
 
-    private static void EmitBehaviorPipeline(StringBuilder sb, HandlerInfo req, string handlerCall, string indent, string spRef)
+    /// <summary>
+    /// Emits the async fallback method that handles the behavior pipeline.
+    /// Only called when HasBehaviors is true at runtime.
+    /// </summary>
+    private static void EmitBehaviorFallbackMethod(StringBuilder sb, HandlerInfo req, string dispatchName)
     {
-        sb.AppendLine($"{indent}var behaviors = {spRef}.GetServices<IPipelineBehavior<{req.MessageTypeFullName}, {req.ResponseTypeFullName}>>();");
-        if (req.ReturnsVoidTask)
-            sb.AppendLine($"{indent}NextDelegate<{req.ResponseTypeFullName}> pipeline = async () => {{ await {handlerCall}.ConfigureAwait(false); return {UnitFull}.Value; }};");
-        else
-            sb.AppendLine($"{indent}NextDelegate<{req.ResponseTypeFullName}> pipeline = () => {handlerCall};");
-        sb.AppendLine($"{indent}foreach (var behavior in behaviors.Reverse())");
+        sb.AppendLine($"    private async Task<{req.ResponseTypeFullName}> {dispatchName}_WithBehaviors({req.MessageTypeFullName} msg, IServiceScope? scope, MessageContextScope? previousCtx, CancellationToken ct)");
+        sb.AppendLine("    {");
+
+        var indent = "        ";
+        var needsScope = req.Lifetime == HandlerLifetime.Scoped ||
+                         (req.IsStatic && req.MethodServices.Count > 0 && req.Lifetime == HandlerLifetime.Scoped);
+        var spRef = needsScope ? "scope!.ServiceProvider" : "_sp";
+
+        sb.AppendLine($"{indent}try");
         sb.AppendLine($"{indent}{{");
-        sb.AppendLine($"{indent}    var next = pipeline;");
-        sb.AppendLine($"{indent}    var b = behavior;");
-        sb.AppendLine($"{indent}    pipeline = () => b.HandleAsync(msg, next, ct);");
+
+        var innerIndent = indent + "    ";
+
+        // Provide ctx variable if handler needs context (it was set by the caller)
+        if (req.HasContextParam)
+        {
+            sb.AppendLine($"{innerIndent}var ctx = MessageContextScope.Current!;");
+        }
+
+        // Resolve method services
+        foreach (var svc in req.MethodServices)
+        {
+            sb.AppendLine($"{innerIndent}var {svc.ParamName} = {spRef}.GetRequiredService<{svc.TypeFullName}>();");
+        }
+
+        // Build handler + call
+        string handlerCallExpr;
+        if (req.IsStatic)
+        {
+            handlerCallExpr = BuildStaticHandlerCall(req, "msg");
+        }
+        else
+        {
+            EmitHandlerConstruction(sb, req, innerIndent, spRef);
+            handlerCallExpr = BuildInstanceHandlerCall(req, "msg");
+        }
+
+        sb.AppendLine($"{innerIndent}var behaviors = {spRef}.GetServices<IPipelineBehavior<{req.MessageTypeFullName}, {req.ResponseTypeFullName}>>();");
+        if (req.ReturnsVoidTask)
+            sb.AppendLine($"{innerIndent}NextDelegate<{req.ResponseTypeFullName}> pipeline = async () => {{ await {handlerCallExpr}.ConfigureAwait(false); return {UnitFull}.Value; }};");
+        else
+            sb.AppendLine($"{innerIndent}NextDelegate<{req.ResponseTypeFullName}> pipeline = () => {handlerCallExpr};");
+        sb.AppendLine($"{innerIndent}foreach (var behavior in behaviors.Reverse())");
+        sb.AppendLine($"{innerIndent}{{");
+        sb.AppendLine($"{innerIndent}    var next = pipeline;");
+        sb.AppendLine($"{innerIndent}    var b = behavior;");
+        sb.AppendLine($"{innerIndent}    pipeline = () => b.HandleAsync(msg, next, ct);");
+        sb.AppendLine($"{innerIndent}}}");
+        sb.AppendLine($"{innerIndent}return await pipeline().ConfigureAwait(false);");
+
         sb.AppendLine($"{indent}}}");
-        sb.AppendLine($"{indent}return await pipeline().ConfigureAwait(false);");
+        sb.AppendLine($"{indent}finally");
+        sb.AppendLine($"{indent}{{");
+        sb.AppendLine($"{indent}    if (previousCtx != null) MessageContextScope.RestoreCurrent(previousCtx);");
+        sb.AppendLine($"{indent}    scope?.Dispose();");
+        sb.AppendLine($"{indent}}}");
+
+        sb.AppendLine("    }");
+        sb.AppendLine();
     }
 
     private static void EmitNotificationHandlerLambda(StringBuilder sb, HandlerInfo h, string indent)
