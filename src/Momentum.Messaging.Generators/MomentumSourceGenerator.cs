@@ -431,14 +431,15 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine("    }");
         sb.AppendLine();
 
-        // ── Emit private typed dispatch methods for each request handler ──
+        // ── Emit private handler processing methods for each request handler ──
         foreach (var req in requests)
         {
-            var dispatchName = "Dispatch_" + SanitizeTypeName(req.MessageTypeFullName);
-            EmitTypedDispatchMethod(sb, req, dispatchName);
+            var processName = "Process_" + SanitizeTypeName(req.MessageTypeFullName);
+            EmitProcessMethod(sb, req, processName);
+            EmitProcessWithPipelineMethod(sb, req, processName);
         }
 
-        // ── SendAsync ── (non-async, returns Task<TResponse> via Unsafe.As on Task)
+        // ── SendAsync ── (pure routing — branches on _hasBehaviors at routing level)
         sb.AppendLine("    public Task<TResponse> SendAsync<TResponse>(IRequest<TResponse> request, CancellationToken ct = default)");
         sb.AppendLine("    {");
         sb.AppendLine("        switch (request)");
@@ -446,10 +447,10 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
 
         foreach (var req in requests)
         {
-            var dispatchName = "Dispatch_" + SanitizeTypeName(req.MessageTypeFullName);
+            var processName = "Process_" + SanitizeTypeName(req.MessageTypeFullName);
             sb.AppendLine($"            case {req.MessageTypeFullName} msg:");
             sb.AppendLine("            {");
-            sb.AppendLine($"                var task = {dispatchName}(msg, ct);");
+            sb.AppendLine($"                var task = _hasBehaviors ? {processName}_WithPipeline(msg, ct) : {processName}(msg, ct);");
             sb.AppendLine($"                return Unsafe.As<Task<{req.ResponseTypeFullName}>, Task<TResponse>>(ref task);");
             sb.AppendLine("            }");
         }
@@ -514,15 +515,13 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
     }
 
     /// <summary>
-    /// Emits a non-async typed dispatch method with synchronous fast path.
-    /// For sync-completing handlers (common case), avoids async state machine allocation entirely.
-    /// Falls back to async helper only when the handler task is not yet complete.
-    /// Wraps in try/catch when cleanup is needed (scope disposal, context restoration).
+    /// Emits a non-async handler processing method with synchronous fast path.
+    /// Self-contained: owns its own DI scope, context, and cleanup.
+    /// Called directly from SendAsync when no behaviors are registered.
     /// </summary>
-    private static void EmitTypedDispatchMethod(StringBuilder sb, HandlerInfo req, string dispatchName)
+    private static void EmitProcessMethod(StringBuilder sb, HandlerInfo req, string processName)
     {
-        // Non-async signature — returns Task directly when possible
-        sb.AppendLine($"    private Task<{req.ResponseTypeFullName}> {dispatchName}({req.MessageTypeFullName} msg, CancellationToken ct)");
+        sb.AppendLine($"    private Task<{req.ResponseTypeFullName}> {processName}({req.MessageTypeFullName} msg, CancellationToken ct)");
         sb.AppendLine("    {");
 
         var needsScope = req.Lifetime == HandlerLifetime.Scoped;
@@ -574,11 +573,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
             handlerCallExpr = BuildInstanceHandlerCall(req, "msg");
         }
 
-        // If behaviors are registered, delegate to async pipeline (owns cleanup via its own try/finally)
-        sb.AppendLine($"{bodyIndent}if (_hasBehaviors)");
-        sb.AppendLine($"{bodyIndent}    return {dispatchName}_WithBehaviors(msg, {(needsScope ? "scope" : "null")}, {(req.HasContextParam ? "previous" : "null")}, ct);");
-
-        // Fast path: no behaviors — get the task and try sync completion
+        // Handler invocation + sync fast path
         if (req.ReturnsVoidTask)
         {
             sb.AppendLine($"{bodyIndent}var __handlerTask = {handlerCallExpr};");
@@ -606,7 +601,7 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
             sb.AppendLine($"{bodyIndent}return AwaitHandler(__handlerTask, {(needsScope ? "scope" : "null")}, {(req.HasContextParam ? "previous" : "null")}, {restoreCtxArg});");
         }
 
-        // Catch block — clean up on synchronous exceptions (service resolution, handler ctor, etc.)
+        // Catch block — clean up on synchronous exceptions
         if (needsCleanup)
         {
             sb.AppendLine($"{indent}}}");
@@ -622,9 +617,6 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
 
         sb.AppendLine("    }");
         sb.AppendLine();
-
-        // Emit the async behavior pipeline fallback method
-        EmitBehaviorFallbackMethod(sb, req, dispatchName);
     }
 
     private static void EmitHandlerConstruction(StringBuilder sb, HandlerInfo req, string indent, string spRef)
@@ -699,29 +691,38 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
     }
 
     /// <summary>
-    /// Emits the async fallback method that handles the behavior pipeline.
-    /// Only called when HasBehaviors is true at runtime.
+    /// Emits an async handler processing method with the behavior pipeline.
+    /// Self-contained: owns its own DI scope, context, and cleanup.
+    /// Called from SendAsync when behaviors are registered.
     /// </summary>
-    private static void EmitBehaviorFallbackMethod(StringBuilder sb, HandlerInfo req, string dispatchName)
+    private static void EmitProcessWithPipelineMethod(StringBuilder sb, HandlerInfo req, string processName)
     {
-        sb.AppendLine($"    private async Task<{req.ResponseTypeFullName}> {dispatchName}_WithBehaviors({req.MessageTypeFullName} msg, IServiceScope? scope, MessageContextScope? previousCtx, CancellationToken ct)");
+        sb.AppendLine($"    private async Task<{req.ResponseTypeFullName}> {processName}_WithPipeline({req.MessageTypeFullName} msg, CancellationToken ct)");
         sb.AppendLine("    {");
 
         var indent = "        ";
         var needsScope = req.Lifetime == HandlerLifetime.Scoped ||
                          (req.IsStatic && req.MethodServices.Count > 0 && req.Lifetime == HandlerLifetime.Scoped);
-        var spRef = needsScope ? "scope!.ServiceProvider" : "_sp";
+        var spRef = needsScope ? "sp" : "_sp";
+
+        // Self-contained scope creation (processing side)
+        if (needsScope)
+        {
+            sb.AppendLine($"{indent}var scope = _sp.CreateScope();");
+            sb.AppendLine($"{indent}var sp = scope.ServiceProvider;");
+        }
+
+        // Self-contained context creation
+        if (req.HasContextParam)
+        {
+            sb.AppendLine($"{indent}var ctx = new MessageContextScope(this, MessageContextScope.Current);");
+            sb.AppendLine($"{indent}var previous = MessageContextScope.SetCurrent(ctx);");
+        }
 
         sb.AppendLine($"{indent}try");
         sb.AppendLine($"{indent}{{");
 
         var innerIndent = indent + "    ";
-
-        // Provide ctx variable if handler needs context (it was set by the caller)
-        if (req.HasContextParam)
-        {
-            sb.AppendLine($"{innerIndent}var ctx = MessageContextScope.Current!;");
-        }
 
         // Resolve method services
         foreach (var svc in req.MethodServices)
@@ -758,8 +759,9 @@ public sealed class MomentumSourceGenerator : IIncrementalGenerator
         sb.AppendLine($"{indent}finally");
         sb.AppendLine($"{indent}{{");
         if (req.HasContextParam)
-            sb.AppendLine($"{indent}    MessageContextScope.RestoreCurrent(previousCtx);");
-        sb.AppendLine($"{indent}    scope?.Dispose();");
+            sb.AppendLine($"{indent}    MessageContextScope.RestoreCurrent(previous);");
+        if (needsScope)
+            sb.AppendLine($"{indent}    scope.Dispose();");
         sb.AppendLine($"{indent}}}");
 
         sb.AppendLine("    }");
